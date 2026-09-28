@@ -599,6 +599,56 @@ fun main() = runBlocking {
         check("标记了需要老人自己做", paused?.needsPerson == true)
     }
 
+    // 19) peace-of-mind watch: never cry wolf, never judge while blind
+    header("平安确认的判定")
+    run {
+        val today = java.time.LocalDate.of(2026, 9, 29)
+        val settings = PeaceSettings(
+            enabled = true, graceMinutes = 90, earliestMinuteOfDay = 8 * 60,
+            minHistoryDays = 3, who = "妈妈",
+        )
+        // 平时七点出头开始用手机
+        val history = mapOf(
+            today.minusDays(1) to 7 * 60 + 10,
+            today.minusDays(2) to 7 * 60 - 5,
+            today.minusDays(3) to 7 * 60 + 20,
+        )
+        check(
+            "未开启时不动",
+            decidePeace(today, 11 * 60, history, null, settings.copy(enabled = false)) is PeaceDecision.Idle,
+        )
+        check(
+            "没在看时不判定（否则会误报）",
+            decidePeace(today, 11 * 60, history, null, settings, watching = false) is PeaceDecision.NotWatching,
+        )
+        check(
+            "今天用过就安静",
+            decidePeace(today, 9 * 60, history + (today to 6 * 60 + 50), null, settings) is PeaceDecision.Active,
+        )
+        check(
+            "还没到点就等着",
+            decidePeace(today, 8 * 60, history, null, settings) is PeaceDecision.Waiting,
+        )
+        val alert = decidePeace(today, 11 * 60, history, null, settings)
+        check("过了宽限期才提醒", alert is PeaceDecision.Alert)
+        check("提醒里带上称呼", (alert as? PeaceDecision.Alert)?.message?.contains("妈妈") == true)
+        check(
+            "同一天只提醒一次",
+            decidePeace(today, 12 * 60, history, today.toEpochDay(), settings) is PeaceDecision.AlreadyTold,
+        )
+        check(
+            "历史不足时不下判断",
+            decidePeace(today, 12 * 60, mapOf(today.minusDays(1) to 7 * 60), null, settings) is PeaceDecision.NoBaseline,
+        )
+        val early = mapOf(
+            today.minusDays(1) to 5 * 60, today.minusDays(2) to 5 * 60 + 10, today.minusDays(3) to 4 * 60 + 50,
+        )
+        check(
+            "再早也不在 8 点前说话",
+            decidePeace(today, 7 * 60 + 30, early, null, settings) is PeaceDecision.Waiting,
+        )
+    }
+
     header(if (failures == 0) "全部通过" else "$failures 项失败")
     if (failures > 0) kotlin.system.exitProcess(1)
 }

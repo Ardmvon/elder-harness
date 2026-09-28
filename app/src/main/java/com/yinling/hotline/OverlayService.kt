@@ -14,6 +14,7 @@ import android.view.View
 import android.view.ViewTreeObserver
 import android.view.Gravity
 import android.view.WindowManager
+import kotlinx.coroutines.delay
 import android.view.animation.DecelerateInterpolator
 import android.view.animation.OvershootInterpolator
 import android.view.animation.PathInterpolator
@@ -66,6 +67,9 @@ class OverlayService : Service() {
     /** The collapsed bubble, kept so a new step can update its label without a rebuild. */
     private var bubble: TextView? = null
 
+    /** Last time the person was nudged about the accessibility service. */
+    private var lastAccessibilityNudge = 0L
+
     /** Breathing animation on the collapsed bubble while the agent works. */
     private var pulse: ObjectAnimator? = null
     private val session get() = (application as HotlineApp).session
@@ -73,6 +77,10 @@ class OverlayService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // Foreground from the first moment: it is what keeps this process — and with it the
+        // accessibility service — from being killed in the background.
+        Notices.ensureChannels(this)
+        startForeground(Notices.ID_ALIVE, Notices.alive(this, "正在守护"))
         if (!Settings.canDrawOverlays(this)) {
             stopSelf()
             return START_NOT_STICKY
@@ -105,8 +113,38 @@ class OverlayService : Service() {
             collector = scope.launch {
                 session.state.collect { state -> render(state) }
             }
+            scope.launch { watchAccessibility() }
         }
         return START_STICKY
+    }
+
+    /**
+     * Watches the one thing this app cannot repair by itself.
+     *
+     * Nothing an app can do re-enables its own accessibility service, so a drop is not something to
+     * paper over: it is something to notice quickly and hand back to the person, because while it
+     * lasts the app is blind — and a watch that is blind must not pretend to be watching.
+     */
+    private suspend fun watchAccessibility() {
+        var misses = 0
+        while (true) {
+            delay(ACCESSIBILITY_CHECK_MS)
+            if (ScreenAccessService.isRunning()) {
+                misses = 0
+                Notices.clearAccessibility(this)
+                continue
+            }
+            val enabled = ScreenAccessService.isEnabled(this)
+            val now = System.currentTimeMillis()
+            if (now - lastAccessibilityNudge < ACCESSIBILITY_NUDGE_MS) continue
+            misses++
+            LoopLog.event("[health] 无障碍未运行（已启用=$enabled，连续 $misses 次）")
+            if (misses >= ACCESSIBILITY_MISSES_BEFORE_NUDGE) {
+                Notices.postAccessibilityOff(this)
+                lastAccessibilityNudge = now
+                misses = 0
+            }
+        }
     }
 
     private fun render(state: SessionState) {
@@ -128,8 +166,10 @@ class OverlayService : Service() {
         if (shape == lastShape) {
             // Same shape, but the run may have moved on a step: that is what the bubble shows.
             bubble?.text = pillLabel(state)
+            Notices.updateAlive(this, pillLabel(state))
             return
         }
+        Notices.updateAlive(this, pillLabel(state))
         // Opening and closing get their own transition, so the panel reads as growing out of the
         // bubble (and shrinking back into it) instead of being swapped in place.
         val expanding = lastExpanded == false && expanded
@@ -565,6 +605,10 @@ class OverlayService : Service() {
         super.onDestroy()
     }
 }
+
+private const val ACCESSIBILITY_CHECK_MS = 60_000L
+private const val ACCESSIBILITY_NUDGE_MS = 60 * 60_000L
+private const val ACCESSIBILITY_MISSES_BEFORE_NUDGE = 3
 
 private val AUTO_EXPAND = setOf(
     TaskPhase.CONFIRMING, TaskPhase.NEEDS_FAMILY, TaskPhase.ASKING, TaskPhase.NEEDS_PERSON,

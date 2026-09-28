@@ -2,10 +2,14 @@ package com.yinling.hotline
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
+import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Path
 import android.graphics.Rect
 import android.os.Build
+import android.provider.Settings
 import android.os.Bundle
 import android.util.Base64
 import android.view.Display
@@ -56,6 +60,23 @@ class ScreenAccessService : AccessibilityService() {
             private set
         var active: ScreenAccessService? = null
             private set
+
+        /** True while the system has this service connected, i.e. we are really receiving events. */
+        fun isRunning(): Boolean = active != null
+
+        /**
+         * Whether the service is switched on in system settings. It may be enabled and not yet
+         * connected (right after a reboot), so this is the weaker of the two checks.
+         */
+        fun isEnabled(context: Context): Boolean {
+            val enabled = Settings.Secure.getString(
+                context.contentResolver,
+                Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES,
+            ).orEmpty()
+            val me = ComponentName(context, ScreenAccessService::class.java).flattenToString()
+            return enabled.split(':').any { it.equals(me, ignoreCase = true) }
+        }
+
         private val sensitiveWords = listOf("收款方", "付款码", "确认支付", "输入密码", "验证码", "人脸识别")
         private val manualActions = listOf(
             "支付", "付款", "转账", "发出", "发送", "提交", "下单", "认证", "授权", "验证码", "密码",
@@ -69,7 +90,20 @@ class ScreenAccessService : AccessibilityService() {
         )
     }
 
-    override fun onServiceConnected() { active = this }
+    override fun onServiceConnected() {
+        active = this
+        LoopLog.event("[health] 无障碍服务已连接")
+        // Self-healing hook: the system rebinds this service whenever it is switched back on (after
+        // a reboot, after the user re-enables it), and that is a far more reliable moment to put the
+        // guard in place than waiting for a boot broadcast the OEM may never deliver.
+        val guard = Intent(this, OverlayService::class.java)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(guard)
+        } else {
+            startService(guard)
+        }
+        Notices.clearAccessibility(this)
+    }
     override fun onAccessibilityEvent(event: AccessibilityEvent?) = Unit
     override fun onInterrupt() { (application as HotlineApp).session.stop() }
     override fun onDestroy() {

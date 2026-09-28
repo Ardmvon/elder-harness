@@ -40,6 +40,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -60,6 +61,8 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         handleDebugIntent()
+        // Opening the app once is enough to put the守护 in place.
+        startOverlay()
         setContent {
             val state by session.state.collectAsState()
             var settings by remember { mutableStateOf(false) }
@@ -162,7 +165,15 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startOverlay() {
-        if (Settings.canDrawOverlays(this)) startService(Intent(this, OverlayService::class.java))
+        if (!Settings.canDrawOverlays(this)) return
+        // Foreground from here on: this service is what keeps the process (and with it the
+        // accessibility service) alive, so it starts as soon as the app is opened, not just when a
+        // task is running.
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            startForegroundService(Intent(this, OverlayService::class.java))
+        } else {
+            startService(Intent(this, OverlayService::class.java))
+        }
     }
 }
 
@@ -327,6 +338,8 @@ private fun SettingsPage(session: SessionController, onBack: () -> Unit) {
         }
         Text("调试试用：所有操作不再询问，直接执行；完整对话写入 files/loop.log。给老人用请关闭。", fontSize = 14.sp)
         Text("访问密钥仅在本次打开应用期间保留。", fontSize = 14.sp, color = Color.DarkGray)
+        Spacer(Modifier.height(8.dp))
+        KeepAliveSection()
         Button(onClick = {
             session.familyName = familyName.trim()
             session.familyPhone = familyPhone.trim()
@@ -337,5 +350,83 @@ private fun SettingsPage(session: SessionController, onBack: () -> Unit) {
             session.developerMode = developer
             onBack()
         }, modifier = Modifier.fillMaxWidth().height(56.dp)) { Text("保存", fontSize = 19.sp) }
+    }
+}
+
+/**
+ * "Keep me running": the three switches an app cannot flip for itself. Each one states plainly
+ * whether it is on, because the failure this screen exists to prevent is the person believing the
+ * assistant is watching when it is not.
+ */
+@Composable
+private fun KeepAliveSection() {
+    val context = LocalContext.current
+    var tick by remember { mutableIntStateOf(0) }
+    val running = remember(tick) { ScreenAccessService.isRunning() }
+    val enabled = remember(tick) { ScreenAccessService.isEnabled(context) }
+    val batteryFree = remember(tick) { KeepAlive.isIgnoringBatteryOptimizations(context) }
+    val canNotify = remember(tick) { KeepAlive.notificationsAllowed(context) }
+    var autoStartFound by remember { mutableStateOf<Boolean?>(null) }
+    val askNotifications = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { tick++ }
+
+    val good = Color(0xFF087E75)
+    val bad = Color(0xFFC46A14)
+
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("一直运行", fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+        Text("这三样决定我能不能一直在后台看着手机。给老人用的手机上都要打开。", fontSize = 15.sp)
+
+        Text(
+            when {
+                running -> "① 无障碍服务：运行中 ✓"
+                enabled -> "① 无障碍服务：已开启，等系统连接…"
+                else -> "① 无障碍服务：未开启 ✗ 我既看不到屏幕，也没法操作"
+            },
+            fontSize = 16.sp,
+            color = if (running) good else bad,
+        )
+        if (!running) {
+            OutlinedButton(
+                onClick = { KeepAlive.openAccessibilitySettings(context) },
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("去开启无障碍服务") }
+        }
+
+        Text(
+            if (batteryFree) "② 电池优化：已忽略 ✓" else "② 电池优化：系统可能随时杀掉我 ✗",
+            fontSize = 16.sp,
+            color = if (batteryFree) good else bad,
+        )
+        if (!batteryFree) {
+            OutlinedButton(
+                onClick = { KeepAlive.requestIgnoreBatteryOptimizations(context) },
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("把本应用加入电池白名单") }
+        }
+
+        Text(
+            if (autoStartFound == true) "③ 自启动：已打开设置页" else "③ 自启动：需要在系统设置里允许本应用自启动",
+            fontSize = 16.sp,
+            color = if (autoStartFound == true) good else bad,
+        )
+        OutlinedButton(
+            onClick = { autoStartFound = KeepAlive.openAutoStartSettings(context) },
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text("打开自启动设置") }
+        if (autoStartFound == false) {
+            Text("没找到自启动页，已打开应用详情：请在系统的“省电/自启动”里允许本应用。", fontSize = 14.sp)
+        }
+
+        if (!canNotify) {
+            Text("④ 通知权限：未开启（掉线时我无法提醒您）", fontSize = 16.sp, color = bad)
+            OutlinedButton(
+                onClick = { askNotifications.launch(android.Manifest.permission.POST_NOTIFICATIONS) },
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("允许通知") }
+        }
+
+        TextButton(onClick = { tick++ }) { Text("重新检查") }
     }
 }
