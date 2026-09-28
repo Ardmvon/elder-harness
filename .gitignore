@@ -1,0 +1,13 @@
+.gradle/
+.idea/
+.kotlin/
+**/build/
+local.properties
+*.iml
+*.apk
+.env*
+*.jks
+*.keystore
+
+# harness 构建产物
+harness/out/

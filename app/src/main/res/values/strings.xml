@@ -1,0 +1,3 @@
+<resources>
+    <string name="access_description">在您同意后读取当前页面文字，帮助寻找下一步操作。不会读取密码输入框。</string>
+</resources>
