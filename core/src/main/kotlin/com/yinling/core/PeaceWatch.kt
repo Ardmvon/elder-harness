@@ -33,6 +33,13 @@ sealed interface PeaceDecision {
     /** Already told the family today. */
     data class AlreadyTold(val usualMinuteOfDay: Int) : PeaceDecision
 
+    /**
+     * The daily "all is well" message. It exists because silence is not evidence of safety: the
+     * family agrees to expect one message a day, so a missing message is itself the alarm — and the
+     * message doubles as proof that the watch is still running.
+     */
+    data class DailyOk(val firstUseMinuteOfDay: Int, val message: String) : PeaceDecision
+
     /** Past the usual time by more than the grace period: speak up. */
     data class Alert(
         val usualMinuteOfDay: Int,
@@ -47,6 +54,8 @@ data class PeaceSettings(
     val graceMinutes: Int = 90,
     /** Never speak before this time, however early the usual time was. */
     val earliestMinuteOfDay: Int = 8 * 60,
+    /** When the daily "all is well" message is due, once the person has used the phone. */
+    val okMinuteOfDay: Int = 9 * 60,
     /** Days of history required before any judgement is made. */
     val minHistoryDays: Int = 3,
     /** How to refer to the person in the message; blank keeps it neutral. */
@@ -70,7 +79,19 @@ fun decidePeace(
     if (!settings.enabled) return PeaceDecision.Idle
     if (!watching) return PeaceDecision.NotWatching("无障碍服务未在运行")
 
-    firstUseByDay[today]?.let { return PeaceDecision.Active(it) }
+    val toldToday = lastAlertEpochDay == today.toEpochDay()
+    val who = settings.who.trim().ifBlank { "家里老人" }
+
+    // Used the phone today: report it once, so the family gets a positive signal rather than silence.
+    firstUseByDay[today]?.let { firstUse ->
+        if (toldToday) return PeaceDecision.Active(firstUse)
+        if (nowMinuteOfDay < settings.okMinuteOfDay) return PeaceDecision.Active(firstUse)
+        return PeaceDecision.DailyOk(
+            firstUseMinuteOfDay = firstUse,
+            message = "报平安：今天 ${clock(firstUse)} $who 就用过手机了，一切正常。" +
+                "（这条消息说明看护还在运行；没收到就请打个电话。）",
+        )
+    }
 
     val history = firstUseByDay.filterKeys { it.isBefore(today) }.values.sorted()
     if (history.size < settings.minHistoryDays) {
@@ -78,12 +99,11 @@ fun decidePeace(
     }
 
     val usual = median(history)
-    if (lastAlertEpochDay == today.toEpochDay()) return PeaceDecision.AlreadyTold(usual)
+    if (toldToday) return PeaceDecision.AlreadyTold(usual)
 
     val speakAt = maxOf(settings.earliestMinuteOfDay, usual + settings.graceMinutes)
     if (nowMinuteOfDay < speakAt) return PeaceDecision.Waiting(usual, nowMinuteOfDay)
 
-    val who = settings.who.trim().ifBlank { "家里老人" }
     return PeaceDecision.Alert(
         usualMinuteOfDay = usual,
         nowMinuteOfDay = nowMinuteOfDay,
@@ -111,7 +131,7 @@ fun peaceStatus(
         "基线积累中 ${history.size}/${settings.minHistoryDays} 天"
     }
     val todayText = if (todayUse != null) "今天 ${clock(todayUse)} 用过" else "今天还没用过"
-    val alertText = if (lastAlertEpochDay == today.toEpochDay()) " · 今天已通知家人" else ""
+    val alertText = if (lastAlertEpochDay == today.toEpochDay()) " · 今天已给家人发过消息" else ""
     return "平安确认：$todayText · $baseline$alertText"
 }
 

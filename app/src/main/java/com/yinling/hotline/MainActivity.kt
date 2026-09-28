@@ -225,8 +225,15 @@ private fun HomePage(
         if (!overlayReady) OutlinedButton(onClick = onOverlayPermission, modifier = Modifier.fillMaxWidth()) {
             Text("开启悬浮窗", fontSize = 18.sp)
         }
-        if (!accessReady) OutlinedButton(onClick = onAccessPermission, modifier = Modifier.fillMaxWidth()) {
-            Text("开启屏幕协助", fontSize = 18.sp)
+        if (!accessReady) {
+            Text(
+                "我现在看不见屏幕：无障碍服务没开，没法帮您操作手机。",
+                fontSize = 17.sp,
+                color = Color(0xFFC46A14),
+            )
+            OutlinedButton(onClick = onAccessPermission, modifier = Modifier.fillMaxWidth()) {
+                Text("开启屏幕协助", fontSize = 18.sp)
+            }
         }
         Button(
             onClick = onStart,
@@ -340,6 +347,8 @@ private fun SettingsPage(session: SessionController, onBack: () -> Unit) {
         Text("访问密钥仅在本次打开应用期间保留。", fontSize = 14.sp, color = Color.DarkGray)
         Spacer(Modifier.height(8.dp))
         KeepAliveSection()
+        Spacer(Modifier.height(8.dp))
+        PeaceSection()
         Button(onClick = {
             session.familyName = familyName.trim()
             session.familyPhone = familyPhone.trim()
@@ -428,5 +437,78 @@ private fun KeepAliveSection() {
         }
 
         TextButton(onClick = { tick++ }) { Text("重新检查") }
+    }
+}
+
+/**
+ * The peace-of-mind agreement, written as an agreement rather than a promise.
+ *
+ * On the phones this runs on, an app cannot be a dependable 24/7 watch: the accessibility service is
+ * removed by the system after a reboot and background execution is restricted. So the mechanism is a
+ * daily message the family expects — a missing message is the alarm — and the screen says so instead
+ * of implying that a phone can be trusted to notice everything.
+ */
+@Composable
+private fun PeaceSection() {
+    val context = LocalContext.current
+    val peace = remember { PeaceCheck(context) }
+    var tick by remember { mutableIntStateOf(0) }
+    var enabled by remember { mutableStateOf(peace.enabled) }
+    var who by remember { mutableStateOf(peace.who) }
+    var okMinute by remember { mutableStateOf(peace.okMinuteOfDay) }
+    val canSms = remember(tick) {
+        context.checkSelfPermission(android.Manifest.permission.SEND_SMS) ==
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+    }
+    val askSms = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { tick++ }
+
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("平安确认（和家人的约定）", fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+        Text(
+            "开启后每天给家人发一条“报平安”。和家人的约定是：收不到这条消息，就打个电话。" +
+                "这不是系统级的看护——手机没电、或系统把服务杀掉时我发不出去，所以这条约定比功能本身更重要。",
+            fontSize = 15.sp,
+        )
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text("开启平安确认", fontSize = 17.sp)
+            Switch(checked = enabled, onCheckedChange = { enabled = it; peace.enabled = it; tick++ })
+        }
+        OutlinedTextField(
+            who, { who = it; peace.who = it },
+            label = { Text("老人称呼（如：妈妈）") },
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Text("每天几点前发这条消息", fontSize = 16.sp)
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            listOf(8 * 60, 9 * 60, 10 * 60).forEach { minute ->
+                OutlinedButton(
+                    onClick = { okMinute = minute; peace.okMinuteOfDay = minute; tick++ },
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text(
+                        "%02d:00".format(minute / 60),
+                        fontWeight = if (okMinute == minute) FontWeight.Bold else FontWeight.Normal,
+                    )
+                }
+            }
+        }
+        if (!canSms) {
+            Text("短信权限未开启，我发不出这条消息。", fontSize = 16.sp, color = Color(0xFFC46A14))
+            OutlinedButton(
+                onClick = { askSms.launch(android.Manifest.permission.SEND_SMS) },
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("允许发送短信") }
+        }
+        Text(remember(tick) { peace.status() }, fontSize = 15.sp)
+        OutlinedButton(
+            onClick = {
+                val decision = peace.preview()
+                LoopLog.event("[peace] 手动检查：$decision")
+                tick++
+            },
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text("现在检查一次（不会发送）") }
     }
 }

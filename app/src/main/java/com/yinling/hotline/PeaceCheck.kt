@@ -45,6 +45,11 @@ class PeaceCheck(private val context: Context) {
         get() = prefs.getInt(KEY_GRACE, 90)
         set(value) = prefs.edit().putInt(KEY_GRACE, value).apply()
 
+    /** When the daily "all is well" message is due. */
+    var okMinuteOfDay: Int
+        get() = prefs.getInt(KEY_OK_MINUTE, 9 * 60)
+        set(value) = prefs.edit().putInt(KEY_OK_MINUTE, value).apply()
+
     /** Records that the phone is in use right now. Cheap: prefs only, no I/O on the hot path. */
     fun noteActivity(now: Long = System.currentTimeMillis()) {
         if (!enabled) return
@@ -72,6 +77,8 @@ class PeaceCheck(private val context: Context) {
     fun evaluate(
         now: Long = System.currentTimeMillis(),
         pretendMinuteOfDay: Int? = null,
+        /** Judge and log, but never send. */
+        announce: Boolean = true,
     ): PeaceDecision {
         val today = day(now)
         val decision = decidePeace(
@@ -83,23 +90,36 @@ class PeaceCheck(private val context: Context) {
             settings = PeaceSettings(
                 enabled = enabled,
                 graceMinutes = graceMinutes,
+                okMinuteOfDay = okMinuteOfDay,
                 who = who,
             ),
         )
-        if (decision is PeaceDecision.Alert) {
-            val told = tell(decision.message)
-            if (told) {
-                prefs.edit().putLong(KEY_LAST_ALERT_DAY, today.toEpochDay()).apply()
-            }
+        // One message a day, whichever kind: the daily "all is well", or the alert when the day
+        // starts unusually late.
+        val message = when (decision) {
+            is PeaceDecision.DailyOk -> decision.message
+            is PeaceDecision.Alert -> decision.message
+            else -> null
+        }
+        if (message != null && !announce) {
+            LoopLog.event("[peace] 预览（不发送）：${decision::class.simpleName}")
+            return decision
+        }
+        if (message != null) {
+            val told = tell(message)
+            if (told) prefs.edit().putLong(KEY_LAST_ALERT_DAY, today.toEpochDay()).apply()
             LoopLog.event(
-                "[peace] ${if (told) "已通知家人" else if (dryRun) "演练，未发送" else "未能通知家人"}" +
-                    "（平时 ${minute(decision.usualMinuteOfDay)}，现在 ${minute(decision.nowMinuteOfDay)}）",
+                "[peace] ${if (told) "已给家人发消息" else if (dryRun) "演练，未发送" else "未能发消息"}" +
+                    "：${decision::class.simpleName}",
             )
         } else {
             LoopLog.event("[peace] $decision")
         }
         return decision
     }
+
+    /** What would happen right now, without sending anything. Used by the settings screen. */
+    fun preview(): PeaceDecision = evaluate(announce = false)
 
     /** Called periodically while the accessibility service runs, and by the settings screen. */
     fun tick(now: Long = System.currentTimeMillis()) {
@@ -110,7 +130,12 @@ class PeaceCheck(private val context: Context) {
         today = day(System.currentTimeMillis()),
         firstUseByDay = firstUse(),
         lastAlertEpochDay = lastAlertDay(),
-        settings = PeaceSettings(enabled = enabled, graceMinutes = graceMinutes, who = who),
+        settings = PeaceSettings(
+            enabled = enabled,
+            graceMinutes = graceMinutes,
+            okMinuteOfDay = okMinuteOfDay,
+            who = who,
+        ),
         watching = ScreenAccessService.isRunning(),
     )
 
@@ -178,6 +203,7 @@ class PeaceCheck(private val context: Context) {
         const val KEY_ENABLED = "peace_enabled"
         const val KEY_WHO = "peace_who"
         const val KEY_GRACE = "peace_grace"
+        const val KEY_OK_MINUTE = "peace_ok_minute"
         const val KEY_LAST_ACTIVITY = "peace_last_activity"
         const val KEY_FIRST_USE = "peace_first_use"
         const val KEY_LAST_ALERT_DAY = "peace_last_alert_day"

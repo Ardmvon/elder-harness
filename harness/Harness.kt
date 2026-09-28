@@ -622,8 +622,8 @@ fun main() = runBlocking {
             decidePeace(today, 11 * 60, history, null, settings, watching = false) is PeaceDecision.NotWatching,
         )
         check(
-            "今天用过就安静",
-            decidePeace(today, 9 * 60, history + (today to 6 * 60 + 50), null, settings) is PeaceDecision.Active,
+            "今天用过、还没到报平安时间，就先安静",
+            decidePeace(today, 8 * 60, history + (today to 6 * 60 + 50), null, settings) is PeaceDecision.Active,
         )
         check(
             "还没到点就等着",
@@ -639,6 +639,26 @@ fun main() = runBlocking {
         check(
             "历史不足时不下判断",
             decidePeace(today, 12 * 60, mapOf(today.minusDays(1) to 7 * 60), null, settings) is PeaceDecision.NoBaseline,
+        )
+        val usedToday = history + (today to 6 * 60 + 40)
+        check(
+            "到了报平安时间就发一条“今天正常”",
+            run {
+                val d = decidePeace(today, 9 * 60 + 5, usedToday, null, settings)
+                d is PeaceDecision.DailyOk && d.message.contains("06:40") && d.message.contains("妈妈")
+            },
+        )
+        check(
+            "没到报平安时间先不发",
+            decidePeace(today, 8 * 60, usedToday, null, settings) is PeaceDecision.Active,
+        )
+        check(
+            "报平安一天只发一条",
+            decidePeace(today, 11 * 60, usedToday, today.toEpochDay(), settings) is PeaceDecision.Active,
+        )
+        check(
+            "发过报平安后不再补发异常提醒",
+            decidePeace(today, 13 * 60, history, today.toEpochDay(), settings) is PeaceDecision.AlreadyTold,
         )
         val early = mapOf(
             today.minusDays(1) to 5 * 60, today.minusDays(2) to 5 * 60 + 10, today.minusDays(3) to 4 * 60 + 50,
