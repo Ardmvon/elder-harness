@@ -87,9 +87,11 @@ object DebugCommand {
         LoopLog.enabled = session.developerMode
         if (extras.value(EXTRA_CLEAR_LOG) == true) LoopLog.clear()
 
+        // Never log the key itself, not even a prefix: this file stays on the device.
         LoopLog.event(
             "debug command: dev=${session.developerMode} vision=${session.visionEnabled} " +
-                "endpoint=${session.endpoint} model=${session.model} key=${session.apiKey.take(6)}…",
+                "endpoint=${session.endpoint} model=${session.model} " +
+                "key=${if (session.apiKey.isBlank()) "未设置" else "已设置(${session.apiKey.length}位)"}",
         )
 
         val goal = (extras.value(EXTRA_GOAL) as? String)?.trim().orEmpty()

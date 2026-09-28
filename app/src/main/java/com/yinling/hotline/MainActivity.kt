@@ -344,7 +344,7 @@ private fun SettingsPage(session: SessionController, onBack: () -> Unit) {
             Switch(checked = developer, onCheckedChange = { developer = it })
         }
         Text("调试试用：所有操作不再询问，直接执行；完整对话写入 files/loop.log。给老人用请关闭。", fontSize = 14.sp)
-        Text("访问密钥仅在本次打开应用期间保留。", fontSize = 14.sp, color = Color.DarkGray)
+        Text("访问密钥保存在本机加密存储（Android Keystore），重启后仍然可用；换手机需要重新填写。", fontSize = 14.sp, color = Color.DarkGray)
         Spacer(Modifier.height(8.dp))
         KeepAliveSection()
         Spacer(Modifier.height(8.dp))

@@ -41,6 +41,8 @@
 
 需要 JDK 17、Android SDK 35。执行 `./gradlew :app:assembleDebug`，安装 `app/build/outputs/apk/debug/app-debug.apk`。应用设置中填写家人电话号码、兼容 OpenAI Chat Completions 且支持 tool calling 的 HTTPS 地址、模型名和访问密钥。
 
+**访问密钥用 Android Keystore 加密后存在本机**（`SecretStore`）：家人配置一次即可，重启、被杀掉、重启手机之后仍然可用——否则每次重启都要有人在那台手机上重新输入 35 位密钥，而老人做不到这件事。密钥不写进对话记录、不写进任务存档、也不写进日志（日志只记"已设置"与长度）。换手机需要重新填写。
+
 在手机上打开应用，按提示开启悬浮窗和辅助功能。说出目标后应用退到后台，悬浮接线台会显示进度（工作时显示"正在办 N"，需要老人时自动展开）。点按胶囊可展开，确认一步、暂停或联系家人。
 
 **调试通道与演示模式是两个开关**：`developer_mode`（adb 传参 + 写 `files/loop.log`）与 `auto_confirm`（界面标为"演示模式"，自动确认一切）。分开才能在开着调试通道的同时测出真实使用时老人会被问什么：

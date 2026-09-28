@@ -85,7 +85,20 @@ class SessionController(private val app: HotlineApp) : FamilyGateway {
             LoopLog.enabled = value
         }
 
-    var apiKey: String = "" // Kept in memory until a private relay is available.
+    /** Cached copy of the encrypted key, so the loop does not touch the Keystore every step. */
+    private var cachedApiKey: String? = null
+
+    /**
+     * Encrypted at rest (see [SecretStore]): the family configures it once, and a restart must not
+     * silently disable the assistant. Never written to the transcript or the log.
+     */
+    var apiKey: String
+        get() = cachedApiKey ?: SecretStore.load(app).also { cachedApiKey = it }
+        set(value) {
+            val trimmed = value.trim()
+            cachedApiKey = trimmed
+            SecretStore.save(app, trimmed)
+        }
 
     private val cache = RecipeCache(prefs)
     private val phoneTools = AndroidPhoneTools(app)
