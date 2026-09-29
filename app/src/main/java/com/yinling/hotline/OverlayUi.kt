@@ -2,6 +2,7 @@ package com.yinling.hotline
 
 import android.content.Context
 import android.graphics.Typeface
+import android.util.TypedValue
 import android.graphics.drawable.GradientDrawable
 import android.view.Gravity
 import android.view.View
@@ -76,17 +77,31 @@ object OverlayUi {
      * One shape, one type scale, no elevation: the two used to be a square flat block next to a
      * rounded raised one, which read as two different apps sharing a window. Shape and radius come
      * from [Elder], so they match the buttons on the home screen exactly.
+     *
+     * The type scale is one number, not a tier per layout: every button asks for [Elder.body] and a
+     * button that cannot fit its label shrinks the text itself. Hard-coding a smaller size for the
+     * two-per-row case made the same kind of button look like two different kinds.
      */
     fun button(
         context: Context,
         label: String,
         primary: Boolean = true,
         onClick: () -> Unit,
-        /** Secondary buttons sit two to a row, so they give up a little type size to fit. */
+        /** A button sharing its row with another one may need to shrink its label. */
         compact: Boolean = false,
     ): Button = Button(context).apply {
         text = label
-        textSize = if (primary || !compact) Elder.body.value else Elder.body.value - 2f
+        textSize = Elder.body.value
+        if (compact) {
+            // 15sp is the floor: below that the label stops being comfortable for the people this
+            // is for, so a layout that needs less than that should be redesigned, not shrunk.
+            setAutoSizeTextTypeUniformWithConfiguration(
+                15,
+                Elder.body.value.toInt(),
+                1,
+                TypedValue.COMPLEX_UNIT_SP,
+            )
+        }
         isAllCaps = false
         // Material's default: a raised, tinted button. Neither belongs on an elder-facing panel.
         backgroundTintList = null
