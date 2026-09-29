@@ -100,11 +100,6 @@ class OverlayService : Service() {
      */
     private var openedWhileWorking = false
 
-    /** True while the microphone is open from the panel. */
-    private var listening = false
-
-    /** True while an utterance is being turned into text. */
-    private var transcribing = false
 
     /** Breathing animation on the collapsed bubble while the agent works. */
     private var pulse: ObjectAnimator? = null
@@ -149,6 +144,8 @@ class OverlayService : Service() {
             collector = scope.launch {
                 session.state.collect { state -> render(state) }
             }
+            // The panel has to redraw when the conversation state changes, not only when the task does.
+            session.voice.onStateChanged = { render(session.state.value) }
             scope.launch { watchAccessibility() }
         }
         return START_STICKY
@@ -396,8 +393,8 @@ class OverlayService : Service() {
      * minute assumes it is broken.
      */
     private fun pillLabel(state: SessionState): String = when {
-        listening -> "正在听…"
-        transcribing -> "正在听懂…"
+        session.voice.state.value == VoiceSession.State.RECORDING -> "正在听…"
+        session.voice.state.value == VoiceSession.State.TRANSCRIBING -> "正在听懂…"
         state.needsPersonStep -> "等您操作"
         state.phase == TaskPhase.WORKING && state.step > 0 -> "正在办 ${state.step}"
         state.phase == TaskPhase.WORKING -> "正在办"
@@ -597,20 +594,28 @@ class OverlayService : Service() {
     private fun micRow(card: LinearLayout) {
         val server = session.server
         if (!server.isConfigured() || !server.speechEnabled) return
-        val label = when {
-            listening -> "说完点这里"
-            transcribing -> "正在听懂…"
-            else -> "说一句话"
+        val label = when (session.voice.state.value) {
+            VoiceSession.State.RECORDING -> "我在听，说完就好"
+            VoiceSession.State.TRANSCRIBING -> "正在听懂…"
+            VoiceSession.State.LISTENING -> "结束对话"
+            VoiceSession.State.OFF -> "说一句话"
         }
         card.addView(
-            OverlayUi.button(this, label, primary = !transcribing, onClick = { toggleMic() }),
+            OverlayUi.button(
+                this,
+                label,
+                primary = session.voice.state.value != VoiceSession.State.TRANSCRIBING,
+                onClick = { toggleMic() },
+            ),
         )
     }
 
+    /** Opens or closes the conversation; the session itself handles listening and interruption. */
     private fun toggleMic() {
-        if (transcribing) return
-        if (listening) {
-            finishListening()
+        if (session.voice.state.value == VoiceSession.State.TRANSCRIBING) return
+        if (session.voice.isActive) {
+            session.voice.stop()
+            render(session.state.value)
             return
         }
         if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) !=
@@ -621,45 +626,8 @@ class OverlayService : Service() {
             openHome()
             return
         }
-        listening = (application as HotlineApp).recorder.start(
-            onAutoStop = { scope.launch { finishListening() } },
-        )
-        if (!listening) {
-            Toast.makeText(this, "麦克风用不了。", Toast.LENGTH_LONG).show()
-            return
-        }
+        session.voice.start()
         render(session.state.value)
-    }
-
-    private fun finishListening() {
-        if (!listening) return
-        listening = false
-        render(session.state.value)
-        val pcm = (application as HotlineApp).recorder.stop()
-        if (pcm.size < 8000) {
-            Toast.makeText(this, "没听到声音，再说一遍。", Toast.LENGTH_LONG).show()
-            return
-        }
-        transcribing = true
-        render(session.state.value)
-        scope.launch {
-            val heard = session.server.transcribe(pcm)
-            transcribing = false
-            if (heard.isNullOrBlank()) {
-                // Say why: "没听清" alone hides whether the server was unreachable, unconfigured,
-                // or simply heard nothing.
-                Toast.makeText(
-                    this@OverlayService,
-                    "没听清（${session.server.lastResult.ifBlank { "没有识别结果" }}）",
-                    Toast.LENGTH_LONG,
-                ).show()
-            } else if (session.state.value.phase == TaskPhase.ASKING) {
-                session.answerQuestion(heard)
-            } else {
-                session.start(heard)
-            }
-            render(session.state.value)
-        }
     }
 
     private fun familyRow(card: LinearLayout, state: SessionState) {

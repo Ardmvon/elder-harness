@@ -60,6 +60,8 @@ class VoiceRecorder {
     fun start(
         source: Int = MediaRecorder.AudioSource.VOICE_RECOGNITION,
         onAutoStop: (() -> Unit)? = null,
+        /** Called once, the moment a voice appears: this is what makes interruption possible. */
+        onSpeechStart: (() -> Unit)? = null,
     ): Boolean {
         if (isRecording) return true
         val minBuffer = AudioRecord.getMinBufferSize(
@@ -106,6 +108,7 @@ class VoiceRecorder {
                     val rms = rmsOf(chunk, read)
                     val millis = read / 2 * 1000 / SAMPLE_RATE
                     if (rms > SPEECH_RMS) {
+                        if (!heardVoice) onSpeechStart?.invoke()
                         heardVoice = true
                         spokeMillis += millis
                         silentMillis = 0

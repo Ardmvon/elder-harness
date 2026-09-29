@@ -112,8 +112,10 @@ class MainActivity : ComponentActivity() {
             var canListen by remember(permissionVersion) {
                 mutableStateOf(session.server.isConfigured() && session.server.speechEnabled)
             }
-            var listening by remember { mutableStateOf(false) }
-            var transcribing by remember { mutableStateOf(false) }
+            // One conversation, owned by the session: this screen only reflects it.
+            val voiceState by session.voice.state.collectAsState()
+            val listening = voiceState != VoiceSession.State.OFF
+            val transcribing = voiceState == VoiceSession.State.TRANSCRIBING
             // A phone can claim to have a speech recogniser and still fail to start it; once that has
             // happened, stop offering it and say what to do instead.
             var voiceBroken by remember { mutableStateOf(false) }
@@ -121,39 +123,11 @@ class MainActivity : ComponentActivity() {
             val micPermission = rememberLauncherForActivityResult(
                 ActivityResultContracts.RequestPermission(),
             ) { granted ->
-                if (granted) listening = hotline.recorder.start()
+                if (granted) session.voice.start()
             }
             LaunchedEffect(Unit) {
                 runCatching { session.server.refreshSpeechStatus() }
                 canListen = session.server.isConfigured() && session.server.speechEnabled
-            }
-            // Ends an utterance: tapped again, or ended by itself when the person stops talking.
-            val stopAndTranscribe: () -> Unit = {
-                if (listening) {
-                    listening = false
-                    val pcm = hotline.recorder.stop()
-                    if (pcm.size < 8000) {
-                        Toast.makeText(this, "没听到声音，再点一下说一遍。", Toast.LENGTH_LONG).show()
-                    } else {
-                        transcribing = true
-                        scope.launch {
-                            val heard = session.server.transcribe(pcm)
-                            transcribing = false
-                            if (heard.isNullOrBlank()) {
-                                Toast.makeText(
-                                    this@MainActivity,
-                                    "没听清（${session.server.lastResult.ifBlank { "没有识别结果" }}）",
-                                    Toast.LENGTH_LONG,
-                                ).show()
-                            } else {
-                                request = heard
-                                startOverlay()
-                                session.start(heard)
-                                moveTaskToBack(true)
-                            }
-                        }
-                    }
-                }
             }
             val voice = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
                 val said = it.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
@@ -197,20 +171,15 @@ class MainActivity : ComponentActivity() {
                             listening = listening,
                             transcribing = transcribing,
                             onListen = {
-                                if (listening) {
-                                    stopAndTranscribe()
-                                } else if (
+                                if (
                                     checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) !=
                                     android.content.pm.PackageManager.PERMISSION_GRANTED
                                 ) {
                                     micPermission.launch(android.Manifest.permission.RECORD_AUDIO)
                                 } else {
-                                    listening = hotline.recorder.start(
-                                        onAutoStop = { scope.launch { stopAndTranscribe() } },
-                                    )
-                                    if (!listening) {
-                                        Toast.makeText(this, "麦克风用不了，请打字告诉它。", Toast.LENGTH_LONG).show()
-                                    }
+                                    // Opens a conversation rather than a one-shot recording: the
+                                    // microphone stays open for the reply, and closes by itself.
+                                    session.voice.toggle()
                                 }
                             },
                             onOverlayPermission = {
@@ -403,7 +372,9 @@ private fun HomePage(
             ElderVoiceCircle(
                 caption = circleCaption,
                 hint = circleHint,
-                listening = false,
+                // A green circle means idle; orange means the microphone is open. The colour is the
+                // one signal that survives not reading the caption.
+                listening = listening || transcribing,
                 busy = busy,
                 icon = when {
                     busy -> Icons.Default.Close

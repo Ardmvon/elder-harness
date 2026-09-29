@@ -58,6 +58,14 @@ class SessionController(private val app: HotlineApp) : FamilyGateway {
     /** Called when the family switches speech on, so the status can be reported honestly at once. */
     fun tryPrepareSpeaker() = app.speaker.prepare()
 
+    /**
+     * The open microphone, shared by the home screen and the floating panel so there is only ever
+     * one conversation, and one place that decides what a spoken sentence means.
+     */
+    val voice: VoiceSession = VoiceSession(app) { pcm -> server.transcribe(pcm) }.also { session ->
+        session.onInstruction = { spoken -> handleVoiceInstruction(spoken) }
+    }
+
     /** Whether the assistant reads its lines out loud. */
     var speakerEnabled: Boolean
         get() = app.speaker.enabled
@@ -398,12 +406,19 @@ class SessionController(private val app: HotlineApp) : FamilyGateway {
                 // A new action means the person's own step is behind us.
                 needsPersonStep = false,
             )
+            // Say what is happening, not only how it ended. Someone who cannot see the screen has
+            // no other way to know the phone is still working on their behalf rather than stuck.
+            app.speaker.say("正在$display")
+            voice.expectReply()
             saveCurrentSession()
         }
 
         override fun onMessage(display: String) {
             mutableState.value = state.value.copy(message = display, phase = TaskPhase.WORKING)
             app.speaker.say(display)
+            // The assistant has just said something: a reply is now expected, so the microphone
+            // stays open instead of closing on the idle timer mid-sentence.
+            voice.expectReply()
         }
 
         override fun onWarning(display: String) {
@@ -524,6 +539,28 @@ class SessionController(private val app: HotlineApp) : FamilyGateway {
     }
 
     // ---- family ------------------------------------------------------------
+
+    /**
+     * What to do with something the person just said.
+     *
+     * One place, so the home screen and the floating panel cannot drift apart: answering a question,
+     * stopping, or starting something new all look the same from the microphone's point of view.
+     */
+    fun handleVoiceInstruction(spoken: String) {
+        val text = spoken.trim().trimEnd('。', '，', '.', ',', '!', '！', '?', '？')
+        if (text.count { it.isLetterOrDigit() } < 2) return
+        val stopWords = setOf("停", "停下", "停下来", "别弄了", "算了", "不用了", "取消")
+        when {
+            stopWords.any { text == it || text.endsWith(it) } -> stop()
+            state.value.phase == TaskPhase.ASKING -> answerQuestion(text)
+            state.value.goal.isNotBlank() -> {
+                // A task is already running: the person talking over it means "do this instead".
+                stop()
+                start(text)
+            }
+            else -> start(text)
+        }
+    }
 
     /**
      * Whether there is any way to reach the circle at all: a paired server, or the fallback of a

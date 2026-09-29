@@ -107,7 +107,12 @@ class Speaker(private val app: HotlineApp) {
     }
 
     private fun speakNow(text: String) {
-        val clean = text.replace(Regex("[\\p{So}\\p{Cn}]"), "").trim()
+        // Quotes and brackets are for reading; spoken aloud they are just noise.
+        val clean = text
+            .replace(Regex("[\\p{So}\\p{Cn}]"), "")
+            .replace(Regex("[「」“”\"'（）()【】\\[\\]]"), "")
+            .replace(Regex("\\s+"), " ")
+            .trim()
         if (clean.isBlank()) return
         engine?.speak(clean.take(240), TextToSpeech.QUEUE_FLUSH, null, "hotline")
     }
