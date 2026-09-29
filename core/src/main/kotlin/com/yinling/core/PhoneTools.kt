@@ -199,6 +199,11 @@ object PhoneToolCatalog {
 
         if (screen.elements.isEmpty()) {
             append("没有读到任何控件。可以下滑看看，或返回桌面重新打开应用。\n")
+        } else if (unnamedLeaves(screen) >= GRAPHICAL_LEAF_THRESHOLD) {
+            append("这一页有 ").append(unnamedLeaves(screen))
+            append(" 个没有文字的控件，内容多半在图像里（表格、图表、图片文字）。")
+            append("请直接用 screenshot 读图，不要逐个点进去探索：点进去会离开这一页，回来时常常已经不是同一页。\n")
+            append('\n')
         } else if (screen.elements.none { it.clickable || it.editable || it.longClickable || it.isSlider }) {
             // A page full of text with nothing to operate (often a WebView) invites blind tapping.
             append("这一页只有文字，没有可操作的控件。请返回上一层，或说明这里做不了。\n")
@@ -300,6 +305,25 @@ object PhoneToolCatalog {
         if (!element.enabled) append(" [已禁用]")
         append('\n')
     }
+
+    /**
+     * Controls with no text at all, which nothing else on the page describes.
+     *
+     * A page full of these is the shape of a drawn table or a WebView: the words are in the pixels,
+     * not in the accessibility tree. That matters because the tree then *looks* informative while
+     * holding none of the content, and a model will rationally try to open cells one by one instead
+     * of reading the picture.
+     */
+    fun unnamedLeaves(screen: ScreenSnapshot): Int {
+        val parentIds = screen.elements.mapNotNull { it.parentId }.toSet()
+        return screen.elements.count { element ->
+            element.id !in parentIds && element.text.isBlank() && element.description.isBlank() &&
+                (element.clickable || element.longClickable || element.editable || element.scrollable)
+        }
+    }
+
+    /** From here on a page counts as \"the content is in the picture, not in the text\". */
+    const val GRAPHICAL_LEAF_THRESHOLD = 6
 
     /** Icon-only controls are worth listing, but not at the cost of drowning the page. */
     private const val MAX_UNNAMED = 24

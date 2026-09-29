@@ -30,6 +30,9 @@ data class ModelConfig(
  * by answering without a tool call. Transient HTTP problems come back as retryable failures so
  * the loop can back off instead of telling the person the task needs a human.
  */
+/** Output budget per step: room for a thinking model's reasoning plus its answer. */
+private const val MAX_COMPLETION_TOKENS = 4096
+
 class CloudPlanner(
     private val config: ModelConfig,
     /** Developer diagnostics: what we asked and what came back. Never used for control flow. */
@@ -59,6 +62,10 @@ class CloudPlanner(
             put("model", config.model)
             put("temperature", 0)
             put("messages", wireMessages(instructions, transcript, config.visionEnabled))
+            // Thinking models (deepseek-flash and friends) spend thousands of tokens reasoning
+            // before they answer. Without an explicit budget the provider's default can be eaten
+            // by the reasoning, and the answer or the tool call comes back truncated.
+            put("max_tokens", MAX_COMPLETION_TOKENS)
             put("tools", JSONArray(tools.map(::wireTool)))
             put("tool_choice", "auto")
         }
@@ -103,8 +110,10 @@ class CloudPlanner(
 
             val body = connection.inputStream.bufferedReader().use { it.readText() }
             val root = JSONObject(body)
-            val message = root.getJSONArray("choices").getJSONObject(0).getJSONObject("message")
+            val choice = root.getJSONArray("choices").getJSONObject(0)
+            val message = choice.getJSONObject("message")
             val text = message.optString("content", "").trim()
+            val finish = choice.optString("finish_reason", "")
             val usage = root.optJSONObject("usage")
             if (usage != null) {
                 val prompt = usage.optInt("prompt_tokens")
@@ -116,7 +125,25 @@ class CloudPlanner(
                 log("usage prompt=$prompt completion=$completion cached=$cached (${rate}%) body=${body.length}B")
             }
             val calls = message.optJSONArray("tool_calls")
+            if (finish == "length") {
+                // Cut off mid-answer. Retry rather than treat a fragment as a conclusion.
+                log("truncated: finish_reason=length text=${text.take(60)}")
+                return@withContext AgentStep.Failure(
+                    "模型这次没说完（输出被截断），我重试一下。",
+                    retryable = true,
+                    code = "truncated",
+                )
+            }
             if (calls == null || calls.length() == 0) {
+                if (text.isBlank()) {
+                    // An empty reply is not an answer: treating it as one ended tasks mid-sentence.
+                    log("empty reply: finish=$finish")
+                    return@withContext AgentStep.Failure(
+                        "模型返回了空响应，我重试一下。",
+                        retryable = true,
+                        code = "empty_reply",
+                    )
+                }
                 log("reply final: ${text.take(160)}")
                 return@withContext AgentStep.Final(text)
             }
@@ -259,6 +286,7 @@ class CloudPlanner(
 - 需要家人帮忙：用 handoff。确认这件事在手机上做不到：用 impossible。
 
 时间：老人说"今天/明天/后天/下周"这类相对时间时，先用 current_time 查当前日期再判断，不要猜。
+页面不完整时：如果看到的只是页面的一部分（内容被截断、列表没到底、像是某个子页面），先用 scroll 或 swipe 把剩下的内容找出来；不要直接关掉应用重开——重开一次要好几步，而且经常回到更差的位置。
 技巧：动手之前先想一下有没有对应的技巧。下面这些情况**必须先 load_skill 查技巧再操作**，不要凭感觉试：
 - 要从截图里读表格、课表、账单、时刻表 → reading_tables
 - 页面文字里找不到你要的信息，但页面有图形内容 → canvas_content

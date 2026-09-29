@@ -124,9 +124,13 @@ class ScreenAccessService : AccessibilityService() {
     private fun readPage(): Page {
         // Ignore our overlay and the keyboard; observe the underlying application window.
         val appWindows = windows.filter { it.type == AccessibilityWindowInfo.TYPE_APPLICATION }
-        val root = appWindows.sortedWith(compareByDescending<AccessibilityWindowInfo> { it.isActive }
-            .thenByDescending { it.isFocused }.thenByDescending { it.layer })
-            .firstNotNullOfOrNull { it.root } ?: rootInActiveWindow
+        // Only the window the person is actually on. Falling back to whichever window happened to
+        // have a root meant a *background* window could be read instead — and if that window held a
+        // password field, the whole screen was marked sensitive and every action, even a screenshot,
+        // was refused. An unreadable active window is a blind page, which is honest; someone else's
+        // window is not.
+        val active = appWindows.firstOrNull { it.isActive } ?: appWindows.firstOrNull { it.isFocused }
+        val root = active?.root ?: rootInActiveWindow
         val metrics = resources.displayMetrics
         val width = metrics.widthPixels
         val height = metrics.heightPixels
@@ -137,6 +141,7 @@ class ScreenAccessService : AccessibilityService() {
         val parents = HashMap<String, String>()
         val elements = mutableListOf<ScreenElement>()
         var sensitive = false
+        var sensitiveReason: String? = null
         // Diagnostics: how much of the tree we actually pass on, and what kind of node we drop.
         var visited = 0
         var invisible = 0
@@ -157,7 +162,10 @@ class ScreenAccessService : AccessibilityService() {
             if (parent != null) parents[id] = parent
             val bounds = Rect().also(node::getBoundsInScreen)
             if (node.isVisibleToUser && !bounds.isEmpty) {
-                sensitive = sensitive || node.isPassword
+                if (node.isPassword) {
+                    sensitiveReason = "密码框 role=${node.className?.toString()?.substringAfterLast('.')}"
+                    sensitive = true
+                }
                 val text = if (node.isPassword) "" else node.text?.toString().orEmpty().take(300)
                 val description = if (node.isPassword) "" else node.contentDescription?.toString().orEmpty().take(300)
                 // Sliders have no label and are usually not "clickable" (they respond to dragging),
@@ -194,8 +202,20 @@ class ScreenAccessService : AccessibilityService() {
         // or a sensitive word on something the person can actually operate, is evidence; body text
         // is not. The per-target check against [manualActions] still runs for every action.
         val actionable = elements.filter { it.clickable || it.editable || it.longClickable }
-        sensitive = sensitive || actionable.any { element ->
-            sensitiveWords.any { word -> element.text.contains(word) || element.description.contains(word) }
+        val hitWord = actionable.firstNotNullOfOrNull { element ->
+            sensitiveWords.firstOrNull { word ->
+                element.text.contains(word) || element.description.contains(word)
+            }
+        }
+        if (hitWord != null) {
+            sensitive = true
+            if (sensitiveReason == null) sensitiveReason = "敏感词「$hitWord」在可操作控件上"
+        }
+        if (sensitive) {
+            LoopLog.event(
+                "[sensitive] $sensitiveReason ｜ 窗口=${root.packageName} " +
+                    "元素=${elements.size} 可见节点=$visited",
+            )
         }
         val topDropped = droppedRoles.entries.sortedByDescending { it.value }.take(4)
             .joinToString(",") { "${it.key}:${it.value}" }
@@ -240,7 +260,11 @@ class ScreenAccessService : AccessibilityService() {
         if (screen.sensitive) {
             return failure(
                 "requires_user",
-                "这一页是身份或支付验证，得您自己来。做完按下面的按钮，我接着办。",
+                if (call.name == "screenshot") {
+                    "这一页涉及密码或验证码，我不能把它的画面发出去，也操作不了。请您自己完成这一步。"
+                } else {
+                    "这一页是身份或支付验证，得您自己来。做完按下面的按钮，我接着办。"
+                },
             )
         }
         if (call.name == "screenshot") return screenshot(screen)
@@ -350,7 +374,12 @@ class ScreenAccessService : AccessibilityService() {
                 page.nodes.getValue(id).performAction(if (long) AccessibilityNodeInfo.ACTION_LONG_CLICK else AccessibilityNodeInfo.ACTION_CLICK)
             }
             "input_text" -> {
-                if (!node.isEditable) return failure("not_editable", "请选择可编辑的输入框编号。")
+                if (!node.isEditable) {
+                    return failure(
+                        "not_editable",
+                        "这个编号不是输入框。请选标记 [可输入] 的控件。",
+                    )
+                }
                 node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, Bundle().apply {
                     putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, call.text)
                 })
@@ -413,7 +442,12 @@ class ScreenAccessService : AccessibilityService() {
         val editable = generateSequence(focused) { it.parent }
             .firstOrNull { it.isEditable }
             ?: focused.takeIf { it.isEditable }
-            ?: return failure("not_editable", "当前焦点不在可输入的位置，请先点中输入框。")
+            ?: return failure(
+                "not_editable",
+                "光标没有在输入框里。这一页读不到控件时（比如微信）：输入框是屏幕最底部那条细长框，" +
+                    "先点它一下再粘贴；不要点键盘上的按键。键盘弹出后输入框会被顶上去，位置会变，" +
+                    "需要重新截图确认。",
+            )
         val ok = editable.performAction(AccessibilityNodeInfo.ACTION_PASTE)
         return if (ok) {
             ToolResult(true, "已粘贴文字，等待检查页面。", screenChanged = true)
@@ -459,6 +493,35 @@ class ScreenAccessService : AccessibilityService() {
 
         }
     } ?: failure("gesture_timeout", "滑动结果等待超时，请重新观察，勿盲目重复。")
+
+    /**
+     * Draws a 10% coordinate grid on the screenshot.
+     *
+     * On pages with no accessibility tree the model can only point by estimating a ratio from the
+     * picture, and that estimate carries tens of pixels of error — enough to miss a chat row or the
+     * input strip at the bottom of WeChat. A labelled grid gives it a ruler instead of a guess.
+     * Drawn before encoding, so it costs nothing per step.
+     */
+    private fun drawGrid(target: Bitmap) {
+        val canvas = android.graphics.Canvas(target)
+        val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+            color = android.graphics.Color.argb(70, 255, 60, 60)
+            strokeWidth = 2f
+        }
+        val label = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+            color = android.graphics.Color.argb(150, 200, 0, 0)
+            textSize = target.height / 90f
+        }
+        for (step in 1..9) {
+            val ratio = step / 10f
+            val x = target.width * ratio
+            val y = target.height * ratio
+            canvas.drawLine(x, 0f, x, target.height.toFloat(), paint)
+            canvas.drawLine(0f, y, target.width.toFloat(), y, paint)
+            canvas.drawText("%.1f".format(ratio), x + 4f, label.textSize, label)
+            canvas.drawText("%.1f".format(ratio), 4f, y - 4f, label)
+        }
+    }
 
     /** Keeps the long edge near [MODEL_IMAGE_MAX_WIDTH] so the upload stays small. */
     private fun scaleForModel(source: Bitmap, maxLongest: Int = MODEL_IMAGE_MAX_WIDTH): Bitmap {
@@ -507,30 +570,35 @@ class ScreenAccessService : AccessibilityService() {
     /** Scaling, compression and base64 for one screenshot. CPU-bound: call it off the main thread. */
     private fun encodeShot(bitmap: Bitmap, screen: ScreenSnapshot): ToolResult {
         val scaled = scaleForModel(bitmap)
+        // Drawing needs a mutable bitmap, and both scaleForModel's result and the hardware-buffer
+        // copy can be immutable. Painting straight onto them threw and failed the whole screenshot.
+        val target = if (scaled.isMutable) scaled else scaled.copy(Bitmap.Config.ARGB_8888, true) ?: scaled
         try {
+            drawGrid(target)
             // Lossless first: JPEG's chroma subsampling is what destroys small coloured text, not
             // the resolution alone. Phone UI is flat colour, so this is often smaller than JPEG.
             var bytes = ByteArrayOutputStream().also {
-                scaled.compress(Bitmap.CompressFormat.WEBP_LOSSLESS, 100, it)
+                target.compress(Bitmap.CompressFormat.WEBP_LOSSLESS, 100, it)
             }.toByteArray()
             var mime = "image/webp"
             if (bytes.size > MODEL_IMAGE_MAX_BYTES) {
                 // Photo-heavy screens do not compress losslessly; trade detail here.
-                val smaller = scaleForModel(scaled, MODEL_IMAGE_MAX_WIDTH / 2)
+                val smaller = scaleForModel(target, MODEL_IMAGE_MAX_WIDTH / 2)
                 bytes = ByteArrayOutputStream().also {
                     smaller.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, it)
                 }.toByteArray()
-                if (smaller !== scaled) smaller.recycle()
+                if (smaller !== target) smaller.recycle()
                 mime = "image/jpeg"
             }
             lastScreenshot = bytes
-            lastScreenshotSize = scaled.width to scaled.height
+            lastScreenshotSize = target.width to target.height
             return ToolResult(
                 true,
-                "已读取屏幕图像（${scaled.width}x${scaled.height}，坐标按屏幕比例给出）。",
+                "已读取屏幕图像（${target.width}x${target.height}，图上有 10% 刻度网格，坐标按屏幕比例给出）。",
                 image = ScreenImage(Base64.encodeToString(bytes, Base64.NO_WRAP), screen.revision, mime),
             )
         } finally {
+            if (target !== scaled) target.recycle()
             if (scaled !== bitmap) bitmap.recycle()
             scaled.recycle()
         }

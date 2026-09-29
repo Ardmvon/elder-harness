@@ -17,6 +17,8 @@ data class Skill(
     val description: String,
     /** When the current package is one of these, the page shows a one-line pointer to the skill. */
     val apps: Set<String> = emptySet(),
+    /** Shown in the page text when this app is in the foreground; empty falls back to a generic line. */
+    val hint: String = "",
     val body: String,
 )
 
@@ -54,7 +56,9 @@ object SkillCatalog {
 - stale_screen / missing_target：编号来自上一次观察，页面已经变了。以最新页面为准重新选编号。
 - ambiguous_target：同一段文字有多处匹配。错误信息里会列出候选编号，改用 click 指定其中一个。
 - unsupported_action：这个控件不支持该动作（例如点到了外层容器）。改点子控件，或改用 tap_text。
-- not_editable：选中的不是输入框。请选标记 [可输入] 的控件。
+- not_editable：光标不在输入框里。有控件树时选标记 [可输入] 的控件；微信这种没有控件树的页面，
+  输入框是屏幕最底部那条细长框，先点它再粘贴——**不要点键盘按键**（键盘又小又密，点不准），
+  而且键盘弹出后输入框会被顶上去，之前算的坐标就失效了。
 连续两次失败就换思路：滚动、搜索、返回重进，或者直接说明卡在哪里。
 """.trimIndent(),
         ),
@@ -83,10 +87,16 @@ object SkillCatalog {
         ),
         Skill(
             name = "wechat_input",
+            hint = "微信里不要试图点屏幕键盘打字（点不准、也打不进去）：先点一下输入框，再用 paste_text 粘贴。" +
+                "详细步骤见 wechat_input 技巧。",
             description = "微信里如何把文字填进输入框（它不接受程序写入和外部注入）",
             apps = setOf("com.tencent.mm"),
             body = """
 微信不接受程序写入文字（input_text）也不接受外部注入（input text），但输入法可以帮忙：
+0. 截图上有 **10% 刻度网格**（横竖红线标着 0.1~0.9），用它定位，不要靠目测：
+   - 没有键盘时，输入框是屏幕**最底部那条细长框**（约 y=0.95）。
+   - **键盘弹出后输入框会被顶到键盘上方**（约 y=0.55~0.6），之前算的坐标立刻失效，要重新截图。
+   - 不要点键盘上的字母键找字——键盘又小又密，点不准；输入法候选栏才是要点的目标。
 1. 用 tap_xy 点中底部输入框，让键盘弹出。
 2. 调用 paste_text 把文字写进系统剪贴板。它很可能返回"不接受程序粘贴"，这不影响下一步。
 3. 输入法通常把剪贴板内容显示为**键盘上方候选栏的第一项**。用 tap_xy 点那一栏靠左的第一项，
@@ -107,10 +117,15 @@ object SkillCatalog {
      */
     fun summary(): String = ""
 
-    /** A one-line nudge shown with the page when the current app has know-how available. */
+    /**
+     * A one-line nudge shown with the page when the current app has know-how available. A skill may
+     * supply its own wording: "there is a skill" was too weak to stop the model from trying the
+     * on-screen keyboard in WeChat first and only reaching for the clipboard much later.
+     */
     fun hintFor(app: String?): String {
         val relevant = skills.filter { app != null && app in it.apps }
         if (relevant.isEmpty()) return ""
+        relevant.firstOrNull { it.hint.isNotBlank() }?.let { return "提示：${it.hint}" }
         return "提示：当前应用有可用技巧 " + relevant.joinToString("、") { it.name } +
             "，遇到困难时可用 load_skill 查看。\n"
     }

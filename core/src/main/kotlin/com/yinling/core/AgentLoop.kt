@@ -245,6 +245,12 @@ class AgentLoop(
     /** True when the last observation had no actionable controls worth showing. */
     private var lastScreenWasBlind = false
 
+    /** True when the page has a tree but its content is drawn (table, chart, web canvas). */
+    private var lastScreenWasGraphical = false
+
+    /** Revision the graphical screenshot was already attached for, so it happens once per page. */
+    private var graphicalShotRevision: String? = null
+
     /**
      * Fingerprints of recent screenshots. On a page with no accessibility tree the rendered text is
      * always the same, so the only honest progress signal is whether the picture itself changed.
@@ -325,6 +331,8 @@ class AgentLoop(
         lastRenderedPage = null
         lastPageFingerprint = null
         lastScreenWasBlind = false
+        lastScreenWasGraphical = false
+        graphicalShotRevision = null
     }
 
     /** Continues a paused run from the same transcript. */
@@ -392,7 +400,7 @@ class AgentLoop(
      * ask for a screenshot. Attach one automatically instead.
      */
     private suspend fun captureWhenBlind() {
-        if (!lastScreenWasBlind) return
+        if (!lastScreenWasBlind && !lastScreenWasGraphical) return
         if (tools.catalog.none { it.name == "screenshot" }) {
             // No accessibility content and no screenshots means the run has no way to observe
             // anything. Say that once instead of letting the model guess for dozens of steps.
@@ -409,7 +417,11 @@ class AgentLoop(
         }
         if (screenshotFailures >= SCREENSHOT_FAILURE_LIMIT) return
 
-        val shot = tools.execute(ToolCall(name = "screenshot", revision = tools.observe().revision))
+        val observed = tools.observe()
+        // A drawn page looks usable in the tree but holds none of the content; attaching the picture
+        // unasked removes the incentive to open cells one by one just to find out what they say.
+        if (!lastScreenWasBlind && observed.revision == graphicalShotRevision) return
+        val shot = tools.execute(ToolCall(name = "screenshot", revision = observed.revision))
         if (!shot.success || shot.image == null) {
             screenshotFailures += 1
             logger("blind page, screenshot failed (${shot.code}) attempt=$screenshotFailures")
@@ -426,8 +438,23 @@ class AgentLoop(
         }
         recentFrames.addLast(shot.image.base64.length.toString() + ":" + shot.image.base64.hashCode())
         while (recentFrames.size > STALL_WINDOW) recentFrames.removeFirst()
-        transcript += AgentMessage(AgentMessage.Role.USER, content = "截图如下，请根据图像判断。", image = shot.image)
-        logger("blind page, attached screenshot ${shot.image.base64.length / 1024}KB")
+        if (lastScreenWasBlind) {
+            transcript += AgentMessage(
+                AgentMessage.Role.USER,
+                content = "截图如下，请根据图像判断。",
+                image = shot.image,
+            )
+            logger("blind page, attached screenshot ${shot.image.base64.length / 1024}KB")
+        } else {
+            graphicalShotRevision = observed.revision
+            transcript += AgentMessage(
+                AgentMessage.Role.USER,
+                content = "（系统提示：这一页的文字里没有内容，内容在图像里。已附上截图，请直接读图回答；" +
+                    "不要靠逐个点进去查看——那会离开这一页，而且回来时常常已经不是同一页。）",
+                image = shot.image,
+            )
+            logger("graphical page, attached screenshot ${shot.image.base64.length / 1024}KB")
+        }
     }
 
     /**
@@ -439,6 +466,8 @@ class AgentLoop(
         val rendered = renderScreen(screen)
         if (rendered.isBlank()) return
         lastScreenWasBlind = screen.elements.none { it.clickable || it.editable || it.scrollable }
+        lastScreenWasGraphical =
+            PhoneToolCatalog.unnamedLeaves(screen) >= PhoneToolCatalog.GRAPHICAL_LEAF_THRESHOLD
         lastPageFingerprint = rendered.hashCode().toString(16)
         // A screenshot taken by an explicit tool call sits on a TOOL message; unless it is moved
         // onto the newest observation the planner never sees it, because only the last message's
@@ -673,15 +702,23 @@ class AgentLoop(
             // Only action steps belong in the window; a lookup would otherwise fill it with the same
             // page and make the next real action look stalled.
             if (observedAfter.elements.isEmpty()) {
-                recentFrames.addLast(fingerprint)
-                while (recentFrames.size > STALL_WINDOW) recentFrames.removeFirst()
+                // A page with no tree renders to the same text every step, so pushing it here would
+                // fill the window with a constant and hide real oscillation. The picture is the only
+                // honest signal on such pages, and it is pushed when a screenshot is captured.
             } else {
                 recentRevisions.addLast(fingerprint)
                 while (recentRevisions.size > STALL_WINDOW) recentRevisions.removeFirst()
             }
             val distinctPages = window.distinct().size
+            // "Keeps coming back to a page it has already been on" is the shape of every loop seen
+            // on a page we cannot read: open something, back out, open the same place again. It does
+            // not repeat exactly, so a period check misses it.
+            val revisits = window.groupingBy { it }.eachCount().values.count { it >= 2 }
             frozen = window.size >= STALL_WINDOW && distinctPages == 1
             cycling = window.size >= STALL_WINDOW && distinctPages == 2
+            if (window.size >= STALL_WINDOW && distinctPages in 3..STALL_WINDOW && revisits >= 1) {
+                cycling = true
+            }
         }
         // A cycle of actions ("enter, back, enter, back") is a loop even when every page differs,
         // which page fingerprints cannot see. Only periods 2 and 3 count: repeating one action

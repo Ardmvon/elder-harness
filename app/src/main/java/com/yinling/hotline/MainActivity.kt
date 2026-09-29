@@ -329,6 +329,12 @@ private fun SettingsPage(session: SessionController, onBack: () -> Unit) {
         Text("办事时，当前页面的可见文字会发送到这里填写的模型服务。", fontSize = 15.sp)
         OutlinedTextField(endpoint, { endpoint = it }, label = { Text("服务地址") }, modifier = Modifier.fillMaxWidth())
         OutlinedTextField(model, { model = it }, label = { Text("模型") }, modifier = Modifier.fillMaxWidth())
+        Text(
+            "建议 deepseek-chat：实测同一任务步数少得多、坐标也更准（3~6 步 vs 19~32 步）。" +
+                "带思考的模型（如 deepseek-flash）每步都要权衡，反而容易来回试、点不准。",
+            fontSize = 14.sp,
+            color = Color.DarkGray,
+        )
         OutlinedTextField(
             key, { key = it }, label = { Text("访问密钥") },
             visualTransformation = PasswordVisualTransformation(),
