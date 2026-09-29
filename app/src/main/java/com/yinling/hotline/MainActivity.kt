@@ -2,6 +2,7 @@ package com.yinling.hotline
 
 import android.content.Intent
 import android.os.Bundle
+import android.widget.Toast
 import android.provider.Settings
 import android.speech.RecognizerIntent
 import androidx.activity.ComponentActivity
@@ -9,6 +10,8 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.ui.Alignment
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -21,6 +24,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Call
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.runtime.rememberCoroutineScope
@@ -33,6 +38,8 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Surface
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.lightColorScheme
@@ -55,9 +62,24 @@ class MainActivity : ComponentActivity() {
     private val session get() = (application as HotlineApp).session
     private var permissionVersion by mutableIntStateOf(0)
 
+    /** Whether this phone has anything that can turn speech into text. */
+    private fun hasSpeechRecognizer(): Boolean = runCatching {
+        packageManager.queryIntentActivities(Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH), 0).isNotEmpty()
+    }.getOrDefault(false)
+
+    /**
+     * Our own screen already shows the state, so the floating panel would only sit on top of it —
+     * including on top of the one button the elder is supposed to press.
+     */
     override fun onResume() {
         super.onResume()
         permissionVersion++
+        OverlayService.setHiddenInApp(true)
+    }
+
+    override fun onPause() {
+        super.onPause()
+        OverlayService.setHiddenInApp(false)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -69,10 +91,24 @@ class MainActivity : ComponentActivity() {
             val state by session.state.collectAsState()
             var settings by remember { mutableStateOf(false) }
             var request by remember { mutableStateOf(state.goal) }
+            // A phone can claim to have a speech recogniser and still fail to start it; once that has
+            // happened, stop offering it and say what to do instead.
+            var voiceBroken by remember { mutableStateOf(false) }
             var answer by remember { mutableStateOf("") }
             val voice = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
-                val words = it.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
-                if (!words.isNullOrEmpty()) request = words.first()
+                val said = it.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+                    ?.firstOrNull()?.trim().orEmpty()
+                if (said.isNotBlank()) {
+                    request = said
+                    // One tap instead of two: the person has already said what they want, so start
+                    // straight away when nothing is running and nothing is missing.
+                    val ready = Settings.canDrawOverlays(this) && ScreenAccessService.active != null
+                    if (ready && session.state.value.goal.isBlank()) {
+                        startOverlay()
+                        session.start(said)
+                        moveTaskToBack(true)
+                    }
+                }
             }
             MaterialTheme(colorScheme = lightColorScheme(
                 primary = Color(0xFF087E75),
@@ -96,6 +132,7 @@ class MainActivity : ComponentActivity() {
                             onRequest = { request = it },
                             overlayReady = remember(tick) { Settings.canDrawOverlays(this) },
                             accessReady = remember(tick) { ScreenAccessService.active != null },
+                            voiceAvailable = remember(tick) { !voiceBroken && hasSpeechRecognizer() },
                             onOverlayPermission = {
                                 startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION))
                             },
@@ -103,11 +140,23 @@ class MainActivity : ComponentActivity() {
                                 startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
                             },
                             onVoice = {
-                                voice.launch(Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                                val ask = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
                                     putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
                                     putExtra(RecognizerIntent.EXTRA_LANGUAGE, "zh-CN")
                                     putExtra(RecognizerIntent.EXTRA_PROMPT, "请说要办的事")
-                                })
+                                }
+                                // Launching an intent nobody handles kills the app; the person is left
+                                // staring at a home screen with no idea what happened.
+                                try {
+                                    voice.launch(ask)
+                                } catch (_: android.content.ActivityNotFoundException) {
+                                    voiceBroken = true
+                                    Toast.makeText(
+                                        this,
+                                        "这台手机没有语音识别，请打字告诉它。",
+                                        Toast.LENGTH_LONG,
+                                    ).show()
+                                }
                             },
                             onStart = {
                                 startOverlay()
@@ -120,11 +169,24 @@ class MainActivity : ComponentActivity() {
                                 moveTaskToBack(true)
                             },
                             onFamily = {
-                                if (!session.hasHelpChannel()) settings = true
-                                else session.requestHelp(state.goal.ifBlank { "使用手机" }, state.message)
+                                // Never drop the elder into the installer's settings wall: if nothing
+                                // is set up, say who can fix it.
+                                if (!session.hasHelpChannel()) {
+                                    Toast.makeText(
+                                        this,
+                                        "还没设置家人联系方式，请让家人帮您设置一下。",
+                                        Toast.LENGTH_LONG,
+                                    ).show()
+                                } else {
+                                    session.requestHelp(state.goal.ifBlank { "使用手机" }, state.message)
+                                }
                             },
                             onCall = {
-                                if (session.familyPhone.isBlank()) settings = true else session.call()
+                                if (session.familyPhone.isBlank()) {
+                                    Toast.makeText(this, "还没设置家人的电话号码。", Toast.LENGTH_LONG).show()
+                                } else {
+                                    session.call()
+                                }
                             },
                             onSettings = { settings = true },
                             onFinish = session::finish,
@@ -188,6 +250,7 @@ private fun HomePage(
     onRequest: (String) -> Unit,
     overlayReady: Boolean,
     accessReady: Boolean,
+    voiceAvailable: Boolean,
     onOverlayPermission: () -> Unit,
     onAccessPermission: () -> Unit,
     onVoice: () -> Unit,
@@ -202,112 +265,159 @@ private fun HomePage(
     onAnswerChange: (String) -> Unit,
     onAnswer: (String) -> Unit,
 ) {
-    Column(
-        modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp),
-        verticalArrangement = Arrangement.spacedBy(18.dp),
-    ) {
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text("银龄专线", fontSize = 30.sp, fontWeight = FontWeight.Bold)
-            IconButton(onClick = onSettings) { Icon(Icons.Default.Settings, contentDescription = "设置") }
-        }
-        Text("今天有什么事要办？", fontSize = 22.sp)
-        OutlinedTextField(
-            value = request,
-            onValueChange = onRequest,
-            label = { Text("说或写下要办的事") },
-            modifier = Modifier.fillMaxWidth(),
-            minLines = 2,
-            textStyle = MaterialTheme.typography.bodyLarge.copy(fontSize = 20.sp),
-        )
-        Button(onClick = onVoice, modifier = Modifier.fillMaxWidth().height(64.dp)) {
-            Icon(Icons.Default.Mic, contentDescription = null)
-            Spacer(Modifier.padding(5.dp))
-            Text("说给接线员听", fontSize = 20.sp)
-        }
-        if (!overlayReady) OutlinedButton(onClick = onOverlayPermission, modifier = Modifier.fillMaxWidth()) {
-            Text("开启悬浮窗", fontSize = 18.sp)
-        }
-        if (!accessReady) {
-            Text(
-                "我现在看不见屏幕：无障碍服务没开，没法帮您操作手机。",
-                fontSize = 17.sp,
-                color = Color(0xFFC46A14),
-            )
-            OutlinedButton(onClick = onAccessPermission, modifier = Modifier.fillMaxWidth()) {
-                Text("开启屏幕协助", fontSize = 18.sp)
-            }
-        }
-        Button(
-            onClick = onStart,
-            enabled = request.isNotBlank() && overlayReady && accessReady,
-            modifier = Modifier.fillMaxWidth().height(64.dp),
-        ) { Text("开始办事", fontSize = 20.sp) }
+    val hasTask = state.goal.isNotBlank()
+    val busy = hasTask && state.phase == TaskPhase.WORKING
+    // One line, and only when it says something the person would want to know.
+    val statusText = when (state.phase) {
+        TaskPhase.WORKING -> "正在办，请稍等"
+        TaskPhase.CONFIRMING -> "等您点一下确认"
+        TaskPhase.ASKING -> "等您回答一句"
+        TaskPhase.NEEDS_PERSON -> "这一步要您自己做"
+        TaskPhase.NEEDS_FAMILY -> "已经找家人了"
+        TaskPhase.PAUSED -> "停下了"
+        TaskPhase.CANNOT -> "这件事我办不了"
+        TaskPhase.COMPLETED -> "办好了"
+        TaskPhase.IDLE -> "我在"
+    }
+    val tone = when (state.phase) {
+        TaskPhase.CANNOT -> Elder.problem
+        TaskPhase.COMPLETED, TaskPhase.IDLE -> Elder.good
+        TaskPhase.WORKING -> Elder.brand
+        else -> Elder.attention
+    }
+    var typing by remember { mutableStateOf(false) }
 
-        if (state.goal.isNotBlank()) {
-            Spacer(Modifier.height(6.dp))
-            Text("正在办", fontSize = 17.sp, color = MaterialTheme.colorScheme.primary)
-            Text(state.goal, fontSize = 21.sp, fontWeight = FontWeight.SemiBold)
-            Text(state.message, fontSize = 18.sp)
-            if (autoConfirm) {
-                Text("演示模式：所有操作自动确认，不询问您。", fontSize = 15.sp, color = MaterialTheme.colorScheme.secondary)
+    Box(modifier = Modifier.fillMaxSize()) {
+        Column(
+            modifier = Modifier.fillMaxSize().padding(Elder.screenPadding),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                // Small and out of the way: the family sets the phone up once, the elder never needs it.
+                IconButton(onClick = onSettings) {
+                    Icon(Icons.Default.Settings, contentDescription = "家人设置", tint = Elder.line)
+                }
             }
-            if (state.phase == TaskPhase.ASKING) {
-                OutlinedTextField(
-                    value = answer,
-                    onValueChange = onAnswerChange,
-                    label = { Text("回答接线员") },
-                    modifier = Modifier.fillMaxWidth(),
-                    textStyle = MaterialTheme.typography.bodyLarge.copy(fontSize = 19.sp),
-                )
-                Button(
-                    onClick = { onAnswer(answer) },
-                    enabled = answer.isNotBlank(),
-                    modifier = Modifier.fillMaxWidth().height(56.dp),
-                ) { Text("回答", fontSize = 19.sp) }
+
+            Spacer(Modifier.weight(1f))
+
+            ElderStatusLine(statusText, tone, modifier = Modifier.fillMaxWidth())
+
+            Spacer(Modifier.height(Elder.gap))
+
+            ElderVoiceCircle(
+                caption = when {
+                    busy -> "停下来"
+                    // Chinese OEM phones frequently ship no system speech recogniser at all. Offering
+                    // a button that throws when pressed is worse than offering the one that works.
+                    voiceAvailable -> "说给接线员听"
+                    else -> "打字告诉它"
+                },
+                hint = when {
+                    busy -> "正在办事，点一下就停"
+                    voiceAvailable -> "点一下，说出您要办的事"
+                    else -> "这台手机没有语音识别，请打字（或点键盘上的话筒说话）"
+                },
+                listening = false,
+                busy = busy,
+                icon = if (voiceAvailable) Icons.Default.Mic else Icons.Default.Edit,
+                onClick = { if (busy) onFinish() else if (voiceAvailable) onVoice() else typing = true },
+            )
+
+            Spacer(Modifier.height(Elder.gap))
+
+            // Cards appear only when the person actually has a decision to make.
+            when (state.phase) {
+                TaskPhase.ASKING -> ElderCard {
+                    Text(state.goal, fontSize = Elder.hint, color = Elder.inkSoft)
+                    Text(state.message, fontSize = Elder.body)
+                    OutlinedTextField(
+                        value = answer,
+                        onValueChange = onAnswerChange,
+                        label = { Text("回答接线员") },
+                        modifier = Modifier.fillMaxWidth(),
+                        textStyle = MaterialTheme.typography.bodyLarge.copy(fontSize = Elder.body),
+                    )
+                    ElderPrimaryButton("回答", { onAnswer(answer) }, enabled = answer.isNotBlank())
+                }
+
+                TaskPhase.NEEDS_PERSON, TaskPhase.PAUSED, TaskPhase.NEEDS_FAMILY, TaskPhase.CANNOT -> ElderCard {
+                    Text(state.message, fontSize = Elder.body)
+                    ElderPrimaryButton("我做好了，继续", onResumeTask)
+                    ElderSecondaryButton("停下来", onFinish)
+                }
+
+                TaskPhase.COMPLETED -> ElderCard {
+                    Text(state.message, fontSize = Elder.body)
+                    ElderPrimaryButton("知道了", onFinish)
+                }
+
+                else -> Unit
             }
-            if (state.phase == TaskPhase.PAUSED || state.phase == TaskPhase.NEEDS_FAMILY ||
-                state.phase == TaskPhase.CANNOT || state.phase == TaskPhase.NEEDS_PERSON
+
+            if (!hasTask && request.isNotBlank()) {
+                ElderCard {
+                    Text("您说的是：", fontSize = Elder.hint, color = Elder.inkSoft)
+                    Text(request, fontSize = Elder.body)
+                    ElderPrimaryButton("就这么办", onStart)
+                }
+            }
+
+            if (!hasTask && typing) {
+                ElderCard {
+                    OutlinedTextField(
+                        value = request,
+                        onValueChange = onRequest,
+                        label = { Text("写下要办的事") },
+                        modifier = Modifier.fillMaxWidth(),
+                        minLines = 2,
+                        textStyle = MaterialTheme.typography.bodyLarge.copy(fontSize = Elder.body),
+                    )
+                    ElderPrimaryButton("就这么办", onStart, enabled = request.isNotBlank())
+                }
+            }
+
+            // Only when something is broken does the page ask for anything else.
+            if (!accessReady) {
+                Spacer(Modifier.height(Elder.gapSmall))
+                ElderNotice("我现在看不见屏幕：无障碍服务没开。", Elder.problem) {
+                    ElderSecondaryButton("开启屏幕协助", onAccessPermission)
+                }
+            } else if (!overlayReady) {
+                Spacer(Modifier.height(Elder.gapSmall))
+                ElderNotice("悬浮窗没开，办事时我看不到您点哪儿。", Elder.attention) {
+                    ElderSecondaryButton("开启悬浮窗", onOverlayPermission)
+                }
+            }
+
+            Spacer(Modifier.weight(1f))
+
+            // The safety net, kept quiet but never removed: when the assistant cannot help, a person
+            // is the answer.
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceEvenly,
             ) {
-                OutlinedButton(onClick = onResumeTask, modifier = Modifier.fillMaxWidth()) {
-                    Text("接着办", fontSize = 18.sp)
-                }
-            }
-            if (state.phase == TaskPhase.COMPLETED) {
-                TextButton(onClick = onFinish) { Text("这件事办好了", fontSize = 18.sp) }
-            }
-        }
-        if (history.isNotEmpty()) {
-            Spacer(Modifier.height(6.dp))
-            Text("上次没办完的事", fontSize = 17.sp, color = MaterialTheme.colorScheme.primary)
-            history.forEach { item ->
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(item.goal, fontSize = 18.sp, maxLines = 2)
-                        Text(
-                            if (item.unfinished) "还没办完 · 走到第${item.steps}步" else "上次已经办好了",
-                            fontSize = 14.sp,
-                            color = Color.DarkGray,
-                        )
+                if (!typing && !hasTask) {
+                    TextButton(onClick = { typing = true }) {
+                        Text("打字", fontSize = Elder.hint, color = Elder.inkSoft)
                     }
-                    OutlinedButton(onClick = { onRestore(item.id) }) { Text("接着办", fontSize = 16.sp) }
+                }
+                TextButton(onClick = onFamily) {
+                    Text("请家人帮忙", fontSize = Elder.hint, color = Elder.inkSoft)
+                }
+                TextButton(onClick = onCall) {
+                    Text("给家人打电话", fontSize = Elder.hint, color = Elder.inkSoft)
                 }
             }
-        }
-        OutlinedButton(onClick = onFamily, modifier = Modifier.fillMaxWidth().height(58.dp)) {
-            Text("请家人帮忙", fontSize = 19.sp)
-        }
-        TextButton(onClick = onCall, modifier = Modifier.fillMaxWidth()) {
-            Icon(Icons.Default.Call, contentDescription = null)
-            Text("给家人打电话", fontSize = 18.sp)
         }
     }
 }
 
+
 @Composable
 private fun SettingsPage(session: SessionController, onBack: () -> Unit) {
+    val context = LocalContext.current
     var familyName by remember { mutableStateOf(session.familyName) }
     var familyPhone by remember { mutableStateOf(session.familyPhone) }
     var endpoint by remember { mutableStateOf(session.endpoint) }
@@ -321,7 +431,39 @@ private fun SettingsPage(session: SessionController, onBack: () -> Unit) {
     ) {
         Row {
             IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回") }
-            Text("设置", fontSize = 27.sp, fontWeight = FontWeight.Bold)
+            Text("家人设置", fontSize = 27.sp, fontWeight = FontWeight.Bold)
+        }
+        Text(
+            "这些是给家人装的，老人不需要进来（首页长按标题可以进来）。",
+            fontSize = 15.sp,
+            color = Color.DarkGray,
+        )
+        var speak by remember { mutableStateOf(session.speakerEnabled) }
+        var speakerState by remember { mutableStateOf(session.speakerStatus()) }
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("语音播报", fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+                Text("接线员说话时念出来，看不清屏幕也听得见。", fontSize = 15.sp, color = Color.DarkGray)
+                Text(speakerState, fontSize = 14.sp, color = Color.DarkGray)
+            }
+            Switch(
+                checked = speak,
+                onCheckedChange = { on ->
+                    speak = on
+                    session.speakerEnabled = on
+                    // Ask the engine to start now so the status line tells the truth immediately.
+                    session.tryPrepareSpeaker()
+                    speakerState = session.speakerStatus()
+                },
+            )
+        }
+        if (!speakerState.startsWith("可用")) {
+            // Chinese OEM phones often ship no usable engine at all; the family has to install one,
+            // and that is a one-tap trip to the system screen rather than something we can do.
+            OutlinedButton(
+                onClick = { (context.applicationContext as HotlineApp).openTextToSpeechSettings() },
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("去设置语音（系统 → 文字转语音）", fontSize = 16.sp) }
         }
         Text("家人", fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
         OutlinedTextField(familyName, { familyName = it }, label = { Text("称呼") }, modifier = Modifier.fillMaxWidth())

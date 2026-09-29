@@ -32,8 +32,30 @@ import kotlinx.coroutines.launch
 class OverlayService : Service() {
     companion object {
         private var active: OverlayService? = null
+
+        /** Hidden for the duration of one action, so our own panel does not appear in screenshots. */
+        private var hiddenForAction = false
+
+        /** Hidden while the elder is looking at our own screen, which says the same thing already. */
+        private var hiddenInApp = false
+
         fun hideForAction(hide: Boolean) {
-            active?.takeIf { it::root.isInitialized }?.root?.visibility = if (hide) View.INVISIBLE else View.VISIBLE
+            hiddenForAction = hide
+            active?.updateVisibility()
+        }
+
+        fun setHiddenInApp(hide: Boolean) {
+            hiddenInApp = hide
+            active?.updateVisibility()
+        }
+    }
+
+    private fun updateVisibility() {
+        if (!::root.isInitialized) return
+        root.visibility = when {
+            hiddenInApp -> View.GONE
+            hiddenForAction -> View.INVISIBLE
+            else -> View.VISIBLE
         }
     }
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)

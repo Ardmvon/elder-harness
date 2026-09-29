@@ -51,6 +51,19 @@ class SessionController(private val app: HotlineApp) : FamilyGateway {
 
     /** The trusted-circle server, if the family has paired this phone with one. */
     val server = ServerClient(app)
+
+    /** Whether this phone can actually speak, for the settings screen. */
+    fun speakerStatus(): String = app.speaker.status()
+
+    /** Called when the family switches speech on, so the status can be reported honestly at once. */
+    fun tryPrepareSpeaker() = app.speaker.prepare()
+
+    /** Whether the assistant reads its lines out loud. */
+    var speakerEnabled: Boolean
+        get() = app.speaker.enabled
+        set(value) {
+            app.speaker.enabled = value
+        }
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private val mutableState = MutableStateFlow(initialState())
     val state = mutableState.asStateFlow()
@@ -390,10 +403,12 @@ class SessionController(private val app: HotlineApp) : FamilyGateway {
 
         override fun onMessage(display: String) {
             mutableState.value = state.value.copy(message = display, phase = TaskPhase.WORKING)
+            app.speaker.say(display)
         }
 
         override fun onWarning(display: String) {
             mutableState.value = state.value.copy(message = display, phase = TaskPhase.WORKING)
+            app.speaker.say(display)
         }
 
         override fun onUsage(promptTokens: Int, completionTokens: Int, cachedTokens: Int) {
@@ -465,6 +480,10 @@ class SessionController(private val app: HotlineApp) : FamilyGateway {
                 step = steps, hasPendingApproval = false, options = outcome.options,
             )
         }
+        // Every ending is read out loud: the conclusion, the question, and the refusal alike. These
+        // are the lines that matter most to someone who cannot comfortably read the screen.
+        app.speaker.say(outcome.message)
+
         // Saved after the phase is updated, otherwise a finished task would be stored as paused.
         saveCurrentSession()
     }

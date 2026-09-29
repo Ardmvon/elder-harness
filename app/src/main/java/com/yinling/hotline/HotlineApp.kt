@@ -8,11 +8,25 @@ class HotlineApp : Application() {
     lateinit var session: SessionController
         private set
 
+    /** Speaks the assistant's lines aloud; see [Speaker] for why this is not optional. */
+    val speaker: Speaker by lazy { Speaker(this) }
+
     override fun onCreate() {
         super.onCreate()
         LoopLog.attach(this)
         session = SessionController(this)
         LoopLog.enabled = session.developerMode
+    }
+
+    /** The system screen where a speech engine is installed or chosen. */
+    fun openTextToSpeechSettings() {
+        val direct = Intent("com.android.settings.TTS_SETTINGS")
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        runCatching { startActivity(direct) }.onFailure {
+            startActivity(
+                Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            )
+        }
     }
 
     fun openDisplaySettings() {
