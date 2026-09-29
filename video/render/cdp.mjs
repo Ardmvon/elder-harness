@@ -6,6 +6,31 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+/**
+ * GL flags for the selected backend.
+ *
+ *   GL_BACKEND=swiftshader (default) software, deterministic, works with no display
+ *   GL_BACKEND=gl-egl               ANGLE over desktop GL through EGL (NVIDIA proprietary)
+ *   GL_BACKEND=egl                  plain EGL
+ *   GL_BACKEND=vulkan               ANGLE over Vulkan
+ *
+ * Chromium silently falls back to SwiftShader when the GPU stack is unavailable, so the
+ * selected backend is not proof of what ran: render/gl-probe.mjs reports the real renderer.
+ */
+function glArgs() {
+  const backend = (process.env.GL_BACKEND || 'swiftshader').toLowerCase()
+  if (backend === 'swiftshader') {
+    return ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--disable-gpu-sandbox']
+  }
+  const common = [
+    '--ignore-gpu-blocklist', '--enable-gpu', '--disable-gpu-sandbox',
+    '--enable-webgl', '--disable-software-rasterizer',
+  ]
+  if (backend === 'vulkan') return [...common, '--use-gl=angle', '--use-angle=vulkan', '--enable-features=Vulkan']
+  if (backend === 'egl') return [...common, '--use-gl=egl']
+  return [...common, '--use-gl=angle', '--use-angle=gl-egl']
+}
+
 const CHROME = process.env.CHROME_BIN
   || join(process.env.HOME, '.cache/ms-playwright/chromium-1243/chrome-linux64/chrome')
 
@@ -19,9 +44,7 @@ export async function launch({ width = 1920, height = 1080, port = 9222 } = {}) 
     '--no-first-run', '--no-default-browser-check',
     '--disable-extensions', '--disable-background-networking',
     '--hide-scrollbars', '--mute-audio',
-    // Headless has no GPU: force the software GL stack, but keep WebGL2 real.
-    '--use-gl=angle', '--use-angle=swiftshader',
-    '--enable-unsafe-swiftshader', '--disable-gpu-sandbox',
+    ...glArgs(),
     'about:blank',
   ]
   const proc = spawn(CHROME, args, { stdio: ['ignore', 'pipe', 'pipe'] })

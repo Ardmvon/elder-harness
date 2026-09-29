@@ -57,9 +57,23 @@ export class Stage {
   /** A crossfade between shots; the outgoing shot is torn down at the midpoint. */
   cutTo(name) {
     if (this.active?.teardown) this.active.teardown(this)
+    // Nothing may leak from one shot into the next. Shot 1 adds its wordmark directly to the
+    // scene (not to its spiral group) and its teardown only hid the group, so the giant title
+    // stayed on screen over shots 2 and 3. Hiding everything and emptying the overlay here
+    // makes that whole class of mistake impossible instead of merely fixing this instance.
+    this.clearFrame()
     this.active = this.shots.get(name)
     if (!this.active) throw new Error(`no shot named ${name}`)
     this.active.enter?.(this)
+  }
+
+  /** Hide every scene object and empty the overlay, releasing its textures. */
+  clearFrame() {
+    for (const child of this.scene.children) child.visible = false
+    for (const child of [...this.overlay.children]) {
+      this.overlay.remove(child)
+      disposeTree(child)
+    }
   }
 
   /** Render exactly one moment. Pure in t. */
@@ -88,4 +102,17 @@ export class Stage {
 /** A shot is a named segment of the timeline with build/enter/update/teardown. */
 export function defineShot({ name, start, duration, build, enter, update, teardown, labels }) {
   return { name, start, duration, end: start + duration, build, enter, update, teardown, labels }
+}
+
+/** Release geometry, materials and their textures for an object tree. */
+function disposeTree(root) {
+  root.traverse((o) => {
+    o.geometry?.dispose?.()
+    if (!o.material) return
+    const materials = Array.isArray(o.material) ? o.material : [o.material]
+    for (const m of materials) {
+      m.map?.dispose?.()
+      m.dispose?.()
+    }
+  })
 }

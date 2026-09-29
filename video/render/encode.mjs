@@ -57,12 +57,26 @@ if (DEVICE) {
 }
 
 ff.push('-filter_complex', filters.join(';'), '-map', '[v]')
-ff.push(
-  '-c:v', 'libx264', '-preset', args.preset ?? 'slow', '-crf', String(args.crf ?? 18),
-  '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
-  '-r', String(FPS),
-  OUT,
-)
+// Encoder. libx264 is the default because it is everywhere and its output is what the
+// storyboard was reviewed against; h264_nvenc offloads the encode to the NVIDIA GPU and
+// is roughly an order of magnitude faster on a long cut.
+const ENCODER = args.encoder ?? process.env.ENCODER ?? 'libx264'
+if (ENCODER === 'h264_nvenc') {
+  ff.push(
+    '-c:v', 'h264_nvenc', '-preset', args.preset ?? 'p5', '-rc', 'vbr',
+    '-cq', String(args.crf ?? 19), '-b:v', '0',
+    '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
+    '-r', String(FPS),
+    OUT,
+  )
+} else {
+  ff.push(
+    '-c:v', 'libx264', '-preset', args.preset ?? 'slow', '-crf', String(args.crf ?? 18),
+    '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
+    '-r', String(FPS),
+    OUT,
+  )
+}
 
 console.log('ffmpeg', ff.join(' '))
 const r = spawnSync('ffmpeg', ff, { stdio: 'inherit' })
