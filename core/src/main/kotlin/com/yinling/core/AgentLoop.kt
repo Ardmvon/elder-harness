@@ -227,6 +227,15 @@ class AgentLoop(
 ) {
     private val transcript = mutableListOf<AgentMessage>()
 
+    /**
+     * Every tool call this run executed, in order. Kept so a completion claim can be checked
+     * against what actually happened (see [OutcomeCheck]).
+     */
+    private val executedCalls = mutableListOf<ExecutedCall>()
+
+    /** Wall clock when this run started: evidence older than this cannot be this run's work. */
+    private var runStartedAt = System.currentTimeMillis()
+
     /** Calls proposed but not yet executed, in order. Non-empty means a resume continues them. */
     private var pending: List<ToolInvocation> = emptyList()
 
@@ -333,6 +342,8 @@ class AgentLoop(
         lastScreenWasBlind = false
         lastScreenWasGraphical = false
         graphicalShotRevision = null
+        executedCalls.clear()
+        runStartedAt = System.currentTimeMillis()
     }
 
     /** Continues a paused run from the same transcript. */
@@ -379,6 +390,22 @@ class AgentLoop(
                 this.step += 1
                 logger("step=${this.step} final")
                 val text = step.message.ifBlank { "这件事办完了。" }
+                // "Done" is a claim about the world, and it is the one claim we can partly check
+                // without asking anyone: a run that typed nothing cannot have sent the text it
+                // quotes, and a time from before the run cannot be its own work.
+                val verdict = OutcomeCheck.check(text, executedCalls, runStartedAt)
+                if (verdict is OutcomeVerdict.Unsupported) {
+                    val honest = OutcomeCheck.explain(verdict)
+                    logger("outcome rejected: ${verdict.reason}")
+                    transcript += assistant(honest)
+                    transcript += AgentMessage(
+                        AgentMessage.Role.USER,
+                        content = "（系统提示：刚才的收尾被驳回，因为 ${verdict.reason}。" +
+                            "如果要继续，请真的把这一步做出来，再说明结果；做不到就如实讲。）",
+                    )
+                    hook.onMessage(honest)
+                    return AgentOutcome.PAUSED(honest, needsPerson = true)
+                }
                 transcript += assistant(text)
                 hook.onMessage(text)
                 return AgentOutcome.COMPLETED(text)
@@ -663,6 +690,12 @@ class AgentLoop(
             alreadyRun[key] = result
             if (spec.informational && result.success) fetched += key
             executed += invocation to result
+            executedCalls += ExecutedCall(
+                tool = invocation.tool,
+                argument = invocation.arguments.values.joinToString(" "),
+                success = result.success,
+                atMillis = System.currentTimeMillis(),
+            )
         }
         pending = emptyList()
 

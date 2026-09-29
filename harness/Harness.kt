@@ -40,6 +40,10 @@ private fun planner(): CloudPlanner =
 private fun retryPlanner(): CloudPlanner =
     CloudPlanner(ModelConfig("http://127.0.0.1:8731", "test-mode:retry", "test-key", visionEnabled = false))
 
+/** A provider that looks at the page and then claims a send it never performed. */
+private fun claimPlanner(): CloudPlanner =
+    CloudPlanner(ModelConfig("http://127.0.0.1:8731", "test-mode:claim", "test-key", visionEnabled = false))
+
 private class Logging : AgentHook {
     val messages = mutableListOf<String>()
     override fun onMessage(display: String) { messages += display; println("  [msg] $display") }
@@ -690,6 +694,87 @@ fun main() = runBlocking {
             "再早也不在 8 点前说话",
             decidePeace(today, 7 * 60 + 30, early, null, settings) is PeaceDecision.Waiting,
         )
+    }
+
+    // 20) 收尾声明必须和这一轮真正做过的动作对得上（机械检查，不看模型脸色）
+    header("结果校验：声明与动作对不上就不算完成")
+    run {
+        fun clockAt(hour: Int, minute: Int): Long =
+            java.util.Calendar.getInstance().apply {
+                set(java.util.Calendar.HOUR_OF_DAY, hour)
+                set(java.util.Calendar.MINUTE, minute)
+                set(java.util.Calendar.SECOND, 0)
+            }.timeInMillis
+
+        val started = clockAt(17, 44)
+        fun call(tool: String, argument: String = "", success: Boolean = true, at: Long = started) =
+            ExecutedCall(tool, argument, success, at)
+
+        // 今晚真实翻车的那次：动作只有"看"，却声明"已发送成功"，还引用了一条 17:37 的旧消息
+        val borrowed = OutcomeCheck.check(
+            "已帮您把消息发出去了：微信的「文件传输助手」聊天里已经有一条您发出的「我到家了」，" +
+                "时间是 17:37，发送成功。",
+            listOf(call("open_app"), call("wait"), call("tap_xy", "0.45 0.593"), call("screenshot")),
+            started,
+        )
+        check("引用别人发的文字 + 引用运行前的时刻 → 不算完成", borrowed is OutcomeVerdict.Unsupported)
+
+        // 完全没动手却声称改好了
+        check(
+            "只看了屏幕却声称改好了 → 不算完成",
+            OutcomeCheck.check(
+                "已经设置好了。",
+                listOf(call("screenshot"), call("wait")),
+                started,
+            ) is OutcomeVerdict.Unsupported,
+        )
+
+        // 不应该误伤：真的粘贴过这段文字
+        check(
+            "真的输入过这段文字，就可以声称填好了",
+            OutcomeCheck.check(
+                "已把「我到家了」填进输入框了。",
+                listOf(call("tap_xy", "0.45 0.958"), call("paste_text", "我到家了")),
+                started,
+            ) is OutcomeVerdict.Supported,
+        )
+
+        // 不应该误伤：声明引用的时刻在运行之后
+        check(
+            "引用本次运行之后的时刻，不算借用旧证据",
+            OutcomeCheck.check(
+                "已发送「我到家了」，时间是 17:45。",
+                listOf(call("paste_text", "我到家了")),
+                started,
+            ) is OutcomeVerdict.Supported,
+        )
+
+        // 不应该误伤：只是读到了信息并回答（没有改变类声明）
+        check(
+            "只读的查询结论不受影响",
+            OutcomeCheck.check(
+                "明天（9月30日 周三）的课表我看好了，有两门课：离散数学、计算机操作基础。",
+                listOf(call("open_app"), call("screenshot")),
+                started,
+            ) is OutcomeVerdict.Supported,
+        )
+    }
+
+    // 21) 接线：声称完成但动作对不上时，循环必须如实收尾，而不是报"完成"
+    header("接线：谎报完成会被拦在循环里")
+    run {
+        val phone = FakePhone()
+        val hook = Logging()
+        val loop = AgentLoop(
+            claimPlanner(), phone,
+            object : ActionApproval { override suspend fun confirm(invocation: ToolInvocation) = true },
+            CloudPlanner.INSTRUCTIONS, hook, renderScreen = { PhoneToolCatalog.render(it) },
+        )
+        val outcome = loop.start("给文件传输助手发消息说我到家了")
+        println("  outcome=${outcome::class.simpleName} msg=${outcome.message}")
+        check("不以「完成」收尾", outcome is AgentOutcome.PAUSED)
+        check("如实说明没能确认", outcome.message.contains("我没法确认"))
+        check("把话讲给老人听", hook.messages.any { it.contains("我没法确认") })
     }
 
     header(if (failures == 0) "全部通过" else "$failures 项失败")

@@ -101,6 +101,20 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(503, {"error": {"message": "temporary"}})
             return
 
+        if mode == "claim":
+            # A run that only looked at the screen, then claimed the work was done — the shape of
+            # the real false success this check exists for.
+            if turns == 0:
+                msg = {"role": "assistant", "content": "我先看一下页面。",
+                       "tool_calls": [call("c1", "scroll", target="0.5", argument="up")]}
+            else:
+                msg = {"role": "assistant",
+                       "content": "已帮您把消息发出去了：聊天里已经有一条您发出的「我到家了」，"
+                                  "时间是 00:01，发送成功。"}
+            self.send_json(200, {"choices": [{"message": msg}],
+                                 "usage": {"prompt_tokens": 10, "completion_tokens": 5}})
+            return
+
         if turns == 0:
             msg = {"role": "assistant", "content": "我先看一下页面。",
                    "tool_calls": [call("c1", "scroll", target="0.5", argument="up")]}
