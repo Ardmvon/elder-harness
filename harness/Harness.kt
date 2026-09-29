@@ -308,6 +308,29 @@ fun main() = runBlocking {
         )
         val rendered = PhoneToolCatalog.render(screen)
         println("  [debug] " + rendered.lines().filter { it.startsWith("[") }.joinToString(" | "))
+        check(
+            "键盘控件单独列出，且不把页面误判成图像页",
+            run {
+                // Eight keyboard keys, most of them unlabelled: exactly what used to be counted as
+                // "content is in the picture" and hidden the keyboard listing.
+                val keys = (0 until 8).map { index ->
+                    ScreenElement(
+                        "k$index", if (index == 3) "我" else "", "", "Key", listOf(index * 10, 2000, index * 10 + 9, 2100),
+                        true, false, false, false, true,
+                    )
+                }
+                val page = ScreenSnapshot(
+                    app = "微信", labels = emptyList(), revision = "r",
+                    elements = listOf(
+                        ScreenElement("e0", "文件传输助手", "", "TextView", listOf(0, 0, 500, 100),
+                            true, false, false, false, true),
+                    ) + keys,
+                )
+                val rendered = PhoneToolCatalog.render(page)
+                rendered.contains("输入法键盘") && rendered.contains("[k3]") &&
+                    !rendered.contains("内容多半在图像里")
+            },
+        )
         check("无标签叶子按钮被列出", rendered.contains("[e2]") && rendered.contains("未命名按钮"))
         check("带上了位置", rendered.contains("位置(10,10)-(100,60)"))
         check("有子节点的容器仍隐藏", !rendered.contains("[e1] "))

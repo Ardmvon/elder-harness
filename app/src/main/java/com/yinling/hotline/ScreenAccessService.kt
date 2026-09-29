@@ -21,6 +21,7 @@ import com.yinling.core.ScreenImage
 import com.yinling.core.ScreenSnapshot
 import com.yinling.core.ToolCall
 import com.yinling.core.ToolResult
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -31,6 +32,18 @@ import kotlin.coroutines.resume
 
 class ScreenAccessService : AccessibilityService() {
     companion object {
+        /** True when the last read saw an input-method window, i.e. the keyboard really is up. */
+        @Volatile
+        var keyboardVisible = false
+            private set
+
+        /** Where the input strip of a chat-style app sits, as a fraction of the screen. */
+        private const val INPUT_STRIP_X = 0.45f
+        private const val INPUT_STRIP_Y = 0.965f
+
+        /** Role used for keyboard nodes so the page can list them separately. */
+        const val KEYBOARD_ROLE = "Key"
+
         private const val JPEG_QUALITY = 80
 
         /**
@@ -63,6 +76,33 @@ class ScreenAccessService : AccessibilityService() {
 
         /** True while the system has this service connected, i.e. we are really receiving events. */
         fun isRunning(): Boolean = active != null
+
+        /**
+         * Height of the on-screen keyboard in pixels, or 0 when it is not showing.
+         *
+         * Worth stating in the page text: on a page with no accessibility tree the model otherwise
+         * has to guess where the input box and the candidate row are, and those are the small targets
+         * it keeps missing. The keyboard itself is a separate window that (with Tencent's IME at
+         * least) is not exposed to accessibility at all, so it cannot be tapped by node either.
+         */
+        fun imeHeight(context: Context): Int = try {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+                0
+            } else {
+                val wm = context.getSystemService(android.view.WindowManager::class.java)
+                val insets = wm?.currentWindowMetrics?.windowInsets
+                // isVisible, not the inset size: the system keeps reporting a remembered IME inset
+                // after the keyboard is hidden, which would have told the model the keyboard was
+                // covering the bottom of a screen it was not on.
+                if (insets?.isVisible(android.view.WindowInsets.Type.ime()) == true) {
+                    insets.getInsets(android.view.WindowInsets.Type.ime()).bottom
+                } else {
+                    0
+                }
+            }
+        } catch (_: Throwable) {
+            0
+        }
 
         /**
          * Whether the service is switched on in system settings. It may be enabled and not yet
@@ -120,6 +160,21 @@ class ScreenAccessService : AccessibilityService() {
         override fun close() = nodes.values.forEach { it.recycle() }
     }
 
+    /** How many visible nodes a tree holds; used by the window diagnostic. */
+    private fun countNodes(node: AccessibilityNodeInfo): Int {
+        var total = 0
+        val stack = ArrayDeque<AccessibilityNodeInfo>()
+        stack.addLast(node)
+        while (stack.isNotEmpty() && total < 500) {
+            val current = stack.removeLast()
+            total++
+            for (index in 0 until current.childCount) {
+                current.getChild(index)?.let { stack.addLast(it) }
+            }
+        }
+        return total
+    }
+
     @Suppress("DEPRECATION")
     private fun readPage(): Page {
         // Ignore our overlay and the keyboard; observe the underlying application window.
@@ -130,6 +185,28 @@ class ScreenAccessService : AccessibilityService() {
         // was refused. An unreadable active window is a blind page, which is honest; someone else's
         // window is not.
         val active = appWindows.firstOrNull { it.isActive } ?: appWindows.firstOrNull { it.isFocused }
+        // Diagnostic: which windows we are allowed to see, and whether the keyboard is among them.
+        // Keyboards are a separate window type, and typing on a blind page currently means guessing
+        // pixel positions for keys that TalkBack would reach by node.
+        LoopLog.event(
+            "[windows] " + windows.joinToString(" | ") { window ->
+                val kind = when (window.type) {
+                    AccessibilityWindowInfo.TYPE_APPLICATION -> "app"
+                    AccessibilityWindowInfo.TYPE_INPUT_METHOD -> "ime"
+                    AccessibilityWindowInfo.TYPE_SYSTEM -> "sys"
+                    else -> "t${window.type}"
+                }
+                val nodes = if (window.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD) {
+                    val root = window.root
+                    val count = if (root == null) 0 else countNodes(root)
+                    root?.recycle()
+                    count
+                } else {
+                    -1
+                }
+                "$kind:${window.title}:a=${window.isActive}:nodes=$nodes"
+            },
+        )
         val root = active?.root ?: rootInActiveWindow
         val metrics = resources.displayMetrics
         val width = metrics.widthPixels
@@ -155,14 +232,18 @@ class ScreenAccessService : AccessibilityService() {
          * and it moves whenever the app inserts a node. The parent map keeps the ability to walk
          * up to a clickable ancestor. Ids are only meaningful for one revision.
          */
-        fun visit(node: AccessibilityNodeInfo, id: String, parent: String?, depth: Int) {
+        fun visit(node: AccessibilityNodeInfo, id: String, parent: String?, depth: Int, fromKeyboard: Boolean = false) {
             if (depth > 24 || nodes.size >= 800) { node.recycle(); return }
             visited++
             nodes[id] = node
             if (parent != null) parents[id] = parent
             val bounds = Rect().also(node::getBoundsInScreen)
-            if (node.isVisibleToUser && !bounds.isEmpty) {
-                if (node.isPassword) {
+            // Keyboard nodes live in a window that is not the active one, so the system often reports
+            // them as not visible even while they are on screen. Their bounds are still real, so
+            // accept them there; on the app's own window keep insisting on visibility.
+            val shown = !bounds.isEmpty && (node.isVisibleToUser || fromKeyboard)
+            if (shown) {
+                if (node.isPassword && !fromKeyboard) {
                     sensitiveReason = "密码框 role=${node.className?.toString()?.substringAfterLast('.')}"
                     sensitive = true
                 }
@@ -181,7 +262,9 @@ class ScreenAccessService : AccessibilityService() {
                     if (text.isNotBlank() || description.isNotBlank()) filteredWithText++ else filteredNoText++
                 }
                 if (interesting) {
-                    elements += ScreenElement(id, text, description, node.className?.toString().orEmpty().substringAfterLast('.'),
+                    elements += ScreenElement(id, text, description,
+                        if (fromKeyboard) KEYBOARD_ROLE
+                        else node.className?.toString().orEmpty().substringAfterLast('.'),
                         listOf(bounds.left, bounds.top, bounds.right, bounds.bottom), node.isClickable,
                         node.isLongClickable, node.isEditable && !node.isPassword, node.isScrollable,
                         node.isEnabled && !node.isPassword, parent,
@@ -191,10 +274,30 @@ class ScreenAccessService : AccessibilityService() {
                 invisible++
             }
             for (i in 0 until node.childCount) {
-                node.getChild(i)?.let { visit(it, "e${nodes.size}", id, depth + 1) }
+                // Keep the keyboard's own prefix and flag all the way down: children used to come
+                // back as ordinary page elements (and were then checked for sensitive words), so the
+                // candidate row the model needed was never listed as a keyboard control at all.
+                val prefix = if (fromKeyboard) "k" else "e"
+                node.getChild(i)?.let { visit(it, "$prefix${nodes.size}", id, depth + 1, fromKeyboard) }
             }
         }
         visit(root, "e0", null, 0)
+        // The keyboard is its own window, and on a page with no accessibility tree the candidate
+        // words and function keys are exactly what the model keeps missing by coordinate estimate.
+        // Tencent's IME does expose them, so list them by id instead of guessing pixels.
+        val imeWindow = windows.firstOrNull { it.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD }
+        keyboardVisible = imeWindow?.root != null
+        imeWindow
+            ?.root
+            ?.let { imeRoot ->
+                val before = elements.size
+                val visitedBefore = visited
+                visit(imeRoot, "k${nodes.size}", null, 0, fromKeyboard = true)
+                val added = elements.drop(before).take(6).joinToString(" / ") {
+                    "${it.id}:${it.text.ifBlank { it.description }.take(8)}:${it.role}"
+                }
+                LoopLog.event("[ime] 节点=$visitedBefore→$visited 收录=${elements.size - before} 样本=[$added]")
+            }
         val labels = elements.flatMap { listOf(it.text, it.description) }.filter(String::isNotBlank).distinct()
         // Page-level sensitivity needs strong evidence. Scanning every visible string made a news
         // banner ("关于铁路收款方变更的公告") mark the whole 12306 home page as sensitive, which
@@ -202,14 +305,14 @@ class ScreenAccessService : AccessibilityService() {
         // or a sensitive word on something the person can actually operate, is evidence; body text
         // is not. The per-target check against [manualActions] still runs for every action.
         val actionable = elements.filter { it.clickable || it.editable || it.longClickable }
-        val hitWord = actionable.firstNotNullOfOrNull { element ->
+        val sensitiveWordHit = actionable.filter { it.role != KEYBOARD_ROLE }.firstNotNullOfOrNull { element ->
             sensitiveWords.firstOrNull { word ->
                 element.text.contains(word) || element.description.contains(word)
             }
         }
-        if (hitWord != null) {
+        if (sensitiveWordHit != null) {
             sensitive = true
-            if (sensitiveReason == null) sensitiveReason = "敏感词「$hitWord」在可操作控件上"
+            if (sensitiveReason == null) sensitiveReason = "敏感词「$sensitiveWordHit」在可操作控件上"
         }
         if (sensitive) {
             LoopLog.event(
@@ -436,18 +539,38 @@ class ScreenAccessService : AccessibilityService() {
      * honour a paste performed by their own focused field. That only works when the focused view
      * is reachable through accessibility; when it is not, the person has to paste manually.
      */
-    fun pasteIntoFocusedField(): ToolResult {
-        val focused = findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
-            ?: return failure("no_input_focus", "没有找到正在输入的输入框，请先点一下输入框再粘贴。")
+    suspend fun pasteIntoFocusedField(): ToolResult {
+        tryPaste()?.let { return it }
+
+        // Nothing to paste into. On a page with no accessibility tree the input box cannot be found
+        // by node, so the model has to hit it by coordinate — and missing it is the single most
+        // common failure in these flows (no focus means no keyboard, no candidate row, nothing).
+        // The input strip is a platform convention at the bottom of the screen, so tap it for the
+        // model instead of asking it to aim again.
+        if (snapshot().elements.isEmpty()) {
+            val metrics = resources.displayMetrics
+            val tapped = dispatchTap(metrics.widthPixels * INPUT_STRIP_X, metrics.heightPixels * INPUT_STRIP_Y)
+            if (tapped) {
+                delay(500)
+                tryPaste()?.let {
+                    return ToolResult(true, "已自动点中输入框并粘贴，等待检查页面。", screenChanged = true)
+                }
+            }
+        }
+        return failure(
+            "not_editable",
+            "没能把文字放进输入框（这一页读不到控件）。输入框通常在屏幕最底部那条，" +
+                "可以自己用 tap_xy 点它一下再 paste_text；不要点键盘上的按键。",
+        )
+    }
+
+    /** Pastes into the focused editable node, or null when there is nothing to paste into. */
+    private fun tryPaste(): ToolResult? {
+        val focused = findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: return null
         val editable = generateSequence(focused) { it.parent }
             .firstOrNull { it.isEditable }
             ?: focused.takeIf { it.isEditable }
-            ?: return failure(
-                "not_editable",
-                "光标没有在输入框里。这一页读不到控件时（比如微信）：输入框是屏幕最底部那条细长框，" +
-                    "先点它一下再粘贴；不要点键盘上的按键。键盘弹出后输入框会被顶上去，位置会变，" +
-                    "需要重新截图确认。",
-            )
+            ?: return null
         val ok = editable.performAction(AccessibilityNodeInfo.ACTION_PASTE)
         return if (ok) {
             ToolResult(true, "已粘贴文字，等待检查页面。", screenChanged = true)
@@ -455,6 +578,25 @@ class ScreenAccessService : AccessibilityService() {
             failure("paste_rejected", "这个应用不接受程序粘贴，请让老人自己粘贴或输入。")
         }
     }
+
+    /** Taps an absolute pixel position; used when the agent has to act without a readable tree. */
+    private suspend fun dispatchTap(x: Float, y: Float): Boolean = withTimeoutOrNull(2000) {
+        suspendCancellableCoroutine { continuation ->
+            val path = Path().apply { moveTo(x, y); lineTo(x + 1f, y + 1f) }
+            val gesture = GestureDescription.Builder()
+                .addStroke(GestureDescription.StrokeDescription(path, 0, 60))
+                .build()
+            dispatchGesture(gesture, object : GestureResultCallback() {
+                override fun onCompleted(gestureDescription: GestureDescription?) {
+                    if (continuation.isActive) continuation.resume(true)
+                }
+
+                override fun onCancelled(gestureDescription: GestureDescription?) {
+                    if (continuation.isActive) continuation.resume(false)
+                }
+            }, null)
+        }
+    } ?: false
 
     /** Taps a screen position. `tap_xy` fractions are already converted to pixels by the loop. */
     private suspend fun tapAt(call: ToolCall): ToolResult = withTimeoutOrNull(2500) {

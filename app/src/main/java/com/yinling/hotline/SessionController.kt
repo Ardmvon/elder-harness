@@ -287,10 +287,34 @@ class SessionController(private val app: HotlineApp) : FamilyGateway {
         hook = hook,
         cache = cache,
         renderScreen = { screen ->
-            com.yinling.core.PhoneToolCatalog.render(screen) + SkillCatalog.hintFor(screen.app)
+            com.yinling.core.PhoneToolCatalog.render(screen) +
+                SkillCatalog.hintFor(screen.app) +
+                keyboardNote(screen)
         },
         logger = { LoopLog.event(it) },
         )
+    }
+
+    /**
+     * When the keyboard is up, say exactly where it is and what not to do with it.
+     *
+     * Two things went wrong without this: the model guessed the input box position (and the keyboard
+     * moves it), and it tried to tap individual keys — the smallest, densest targets on the screen,
+     * where a coordinate estimate of tens of pixels lands on the wrong key. The keys are not in the
+     * accessibility tree either, so there is no node to fall back on.
+     */
+    private fun keyboardNote(screen: com.yinling.core.ScreenSnapshot): String {
+        val height = app.resources.displayMetrics.heightPixels
+        // Two independent signals, both must agree: the service saw a keyboard window, and the
+        // system says the IME is actually visible.
+        val ime = if (ScreenAccessService.keyboardVisible) ScreenAccessService.imeHeight(app) else 0
+        if (ime <= 0 || height <= 0) return ""
+        val top = 1f - ime.toFloat() / height
+        val percent = ime * 100 / height
+        return "\n键盘占据了屏幕下方 $percent%（y ≥ ${"%.2f".format(top)} 都是键盘）。" +
+            "键盘上的字母键很小、读不到控件编号，不要逐个去点；" +
+            "但键盘的候选词和功能键（如删除）在页面里以 k 开头的编号列出，可以直接点它们。" +
+            "要输入整句文字时用剪贴板粘贴（见 wechat_input 技巧）：先点输入框（紧邻键盘上沿），再 paste_text。"
     }
 
     private fun logPlanner(message: String) = LoopLog.event("[planner] $message")

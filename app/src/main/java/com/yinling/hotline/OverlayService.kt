@@ -70,6 +70,13 @@ class OverlayService : Service() {
     /** Last time the person was nudged about the accessibility service. */
     private var lastAccessibilityNudge = 0L
 
+    /**
+     * The person opened the panel while the agent is working. The panel is collapsed by default so it
+     * cannot cover the page being read, but that must never take away the stop button: tapping the
+     * bubble forces it open, and only an explicit collapse (or a phase change) closes it again.
+     */
+    private var openedWhileWorking = false
+
     /** Breathing animation on the collapsed bubble while the agent works. */
     private var pulse: ObjectAnimator? = null
     private val session get() = (application as HotlineApp).session
@@ -156,10 +163,13 @@ class OverlayService : Service() {
         if (state.phase in AUTO_EXPAND) {
             if (phaseChanged) expanded = true
         } else if (state.phase == TaskPhase.WORKING) {
-            // While it works, stay collapsed. An open panel covers part of the screen, and the
-            // agent reads that screen from a screenshot: our own window was hiding the columns it
-            // was trying to read, which is how a timetable got misread.
-            expanded = false
+            // While it works, stay collapsed unless the person deliberately opened it. An open panel
+            // covers part of the screen, and the agent reads that screen from a screenshot: our own
+            // window was hiding the columns it was trying to read.
+            if (!phaseChanged) expanded = openedWhileWorking
+            if (phaseChanged) openedWhileWorking = false
+        } else {
+            openedWhileWorking = false
         }
 
         val shape = "${state.phase}|$expanded|${state.goal}|${state.message}|${state.options}"
@@ -216,7 +226,11 @@ class OverlayService : Service() {
                 gravity = Gravity.CENTER
                 minWidth = dp(72)
                 minHeight = dp(38)
-                setOnClickListener { expanded = true; render(session.state.value) }
+                setOnClickListener {
+                    expanded = true
+                    openedWhileWorking = session.state.value.phase == TaskPhase.WORKING
+                    render(session.state.value)
+                }
                 contentDescription = "展开银龄专线接线台"
             }
             root.addView(bubble)
@@ -242,7 +256,9 @@ class OverlayService : Service() {
         // A result renders its own heading, goal and conclusion; adding the generic header too
         // would print all three twice.
         val isResult = state.phase == TaskPhase.COMPLETED || state.phase == TaskPhase.CANNOT
-        val isPersonStep = state.phase == TaskPhase.PAUSED && state.needsPersonStep
+        // Only the cases where the next move is the person's own: the agent refused an irreversible
+        // step for them, or asked them to do it. A run that merely got stuck keeps the generic panel.
+        val isPersonStep = state.needsPersonStep || state.phase == TaskPhase.NEEDS_PERSON
         if (!isResult && !isPersonStep) {
             card.addView(TextView(this).apply {
                 text = "银龄专线  ·  ${state.phase.title()}"
@@ -295,6 +311,16 @@ class OverlayService : Service() {
                 resultCard(card, state, phaseChanged && !expanding)
 
             isPersonStep -> personStepCard(card, state, phaseChanged && !expanding)
+
+            // Opened by hand while the agent is working: keep it short, so it stays out of the way
+            // while still giving one obvious way to stop.
+            state.phase == TaskPhase.WORKING -> {
+                row(
+                    card,
+                    "停下来" to { session.stop() },
+                    "收起" to { openedWhileWorking = false; expanded = false; render(session.state.value) },
+                )
+            }
 
             else -> {
                 row(card, "打开" to { openHome() }, "找家人" to { familyRow(card, state) })

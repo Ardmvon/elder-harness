@@ -197,7 +197,31 @@ object PhoneToolCatalog {
         if (screen.sensitive) append("  ⚠ 敏感页面：需要老人本人操作")
         append('\n')
 
-        if (screen.elements.isEmpty()) {
+        // The keyboard is listed before the page and regardless of which branch the page takes: it
+        // is up whenever the person is typing, and its candidate row is the one control the model
+        // repeatedly missed by coordinate estimate.
+        val keyboard = screen.elements.filter { it.role == KEYBOARD_ROLE }.take(MAX_KEYBOARD)
+        if (keyboard.isNotEmpty()) {
+            append("输入法键盘（可以按编号精确点按）：")
+            keyboard.forEach { element ->
+                val label = element.text.ifBlank { element.description }
+                append("[").append(element.id).append("]")
+                append(if (label.isBlank()) "?" else label.take(12))
+                // Most IME keys expose no text at all, so the id alone is useless to the model. Its
+                // position is what lets it match a candidate word it can see in the screenshot to an
+                // exact, clickable id — no coordinate estimate involved.
+                val bounds = element.bounds
+                if (bounds.size == 4 && screen.width > 0 && screen.height > 0) {
+                    val centreX = (bounds[0] + bounds[2]) / 2f / screen.width
+                    val centreY = (bounds[1] + bounds[3]) / 2f / screen.height
+                    append("@%.2f,%.2f".format(centreX, centreY))
+                }
+                append(' ')
+            }
+            append('\n')
+        }
+
+        if (screen.elements.none { it.role != KEYBOARD_ROLE }) {
             append("没有读到任何控件。可以下滑看看，或返回桌面重新打开应用。\n")
         } else if (unnamedLeaves(screen) >= GRAPHICAL_LEAF_THRESHOLD) {
             append("这一页有 ").append(unnamedLeaves(screen))
@@ -223,6 +247,7 @@ object PhoneToolCatalog {
                     (element.clickable || element.longClickable || element.editable || element.scrollable)
 
             val listed = screen.elements
+                .filter { it.role != KEYBOARD_ROLE }
                 .sortedByDescending { element ->
                     val labelled = element.text.isNotBlank() || element.description.isNotBlank()
                     when {
@@ -316,11 +341,19 @@ object PhoneToolCatalog {
      */
     fun unnamedLeaves(screen: ScreenSnapshot): Int {
         val parentIds = screen.elements.mapNotNull { it.parentId }.toSet()
-        return screen.elements.count { element ->
+        // Keyboard keys are not page content: counting them made an ordinary page look like a
+        // drawn table (which triggers an unasked screenshot) and hid the keyboard listing itself.
+        return screen.elements.filter { it.role != KEYBOARD_ROLE }.count { element ->
             element.id !in parentIds && element.text.isBlank() && element.description.isBlank() &&
                 (element.clickable || element.longClickable || element.editable || element.scrollable)
         }
     }
+
+    /** Role the accessibility service uses for keyboard nodes. */
+    const val KEYBOARD_ROLE = "Key"
+
+    /** Enough for a candidate row plus the function keys; the letter matrix is not worth listing. */
+    const val MAX_KEYBOARD = 24
 
     /** From here on a page counts as \"the content is in the picture, not in the text\". */
     const val GRAPHICAL_LEAF_THRESHOLD = 6

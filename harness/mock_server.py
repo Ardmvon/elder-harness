@@ -4,7 +4,8 @@
 Strictly validates the message sequence the way a real provider does. Any structural
 violation comes back as HTTP 400 with a diagnostic, so an invalid transcript cannot pass.
 """
-import json, sys
+import json
+import os, sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from collections import Counter
 
@@ -79,7 +80,11 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(400, {"error": {"message": "; ".join(errs)}})
             return
         if not sizes:
-            open("/tmp/mockai/payload.json","w").write(json.dumps(payload, ensure_ascii=False))
+            try:
+                os.makedirs("/tmp/mockai", exist_ok=True)
+                open("/tmp/mockai/payload.json","w").write(json.dumps(payload, ensure_ascii=False))
+            except OSError:
+                pass  # a diagnostic dump must never take the check run down with it
             sys_len = len(json.dumps(messages[0], ensure_ascii=False))
             tools_len = len(json.dumps(tools, ensure_ascii=False))
             body_len = len(json.dumps(payload, ensure_ascii=False))
