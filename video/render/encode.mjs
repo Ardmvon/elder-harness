@@ -63,8 +63,11 @@ ff.push('-filter_complex', filters.join(';'), '-map', '[v]')
 const ENCODER = args.encoder ?? process.env.ENCODER ?? 'libx264'
 if (ENCODER === 'h264_nvenc') {
   ff.push(
-    '-c:v', 'h264_nvenc', '-preset', args.preset ?? 'p5', '-rc', 'vbr',
-    '-cq', String(args.crf ?? 19), '-b:v', '0',
+    // Capped VBR. Uncapped -cq on grainy footage produced 40 Mbps (91 MB for 18s): grain is
+    // the most expensive thing in the frame, and a demo file does not need it bit-exact.
+    '-c:v', 'h264_nvenc', '-preset', args.preset ?? 'p6', '-rc', 'vbr',
+    '-cq', String(args.crf ?? 25), '-b:v', String(args.bitrate ?? '9M'),
+    '-maxrate', String(args.maxrate ?? '14M'), '-bufsize', String(args.bufsize ?? '28M'),
     '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
     '-r', String(FPS),
     OUT,

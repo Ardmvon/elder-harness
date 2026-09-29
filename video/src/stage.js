@@ -176,7 +176,7 @@ const LENS_SHADER = {
     tDiffuse: { value: null },
     uTime: { value: 0 },
     uVignette: { value: 0.62 },
-    uGrain: { value: 0.030 },
+    uGrain: { value: 0.016 },
     uAberration: { value: 0.0022 },
   },
   vertexShader: /* glsl */`

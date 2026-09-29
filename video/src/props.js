@@ -456,7 +456,7 @@ export function makeSet({ tint = BRAND, floorY = -1.28 } = {}) {
     new THREE.PlaneGeometry(9.5, 1.5),
     new THREE.MeshBasicMaterial({
       map: bandTexture(), transparent: true, depthWrite: false,
-      blending: THREE.AdditiveBlending, color: tint, opacity: 0.42,
+      blending: THREE.AdditiveBlending, color: tint, opacity: 0.26,
     }),
   )
   horizon.position.set(0, -0.62, -2.4)
@@ -466,7 +466,7 @@ export function makeSet({ tint = BRAND, floorY = -1.28 } = {}) {
     new THREE.PlaneGeometry(16, 0.5),
     new THREE.MeshBasicMaterial({
       map: bandTexture(), transparent: true, depthWrite: false,
-      blending: THREE.AdditiveBlending, color: 0x2E5F7A, opacity: 0.22,
+      blending: THREE.AdditiveBlending, color: 0x2E5F7A, opacity: 0.13,
     }),
   )
   horizonWide.position.set(0, -1.02, -3.6)
@@ -480,10 +480,10 @@ export function makeSet({ tint = BRAND, floorY = -1.28 } = {}) {
   // The far edge blends into the background rather than ending in a visible line: a hard
   // horizon at mid-frame reads as a wall, and there is no wall in this scene.
   const grd = fctx.createLinearGradient(0, 0, 0, 256)
-  grd.addColorStop(0, 'rgba(14,20,24,1)')
-  grd.addColorStop(0.35, 'rgba(17,26,31,1)')
-  grd.addColorStop(0.75, 'rgba(12,18,22,1)')
-  grd.addColorStop(1, 'rgba(9,13,16,1)')
+  grd.addColorStop(0, 'rgba(11,16,19,1)')
+  grd.addColorStop(0.35, 'rgba(14,21,25,1)')
+  grd.addColorStop(0.75, 'rgba(10,15,18,1)')
+  grd.addColorStop(1, 'rgba(8,11,14,1)')
   fctx.fillStyle = grd
   fctx.fillRect(0, 0, 512, 256)
   const floorMap = new THREE.CanvasTexture(floorCanvas)
@@ -502,7 +502,7 @@ export function makeSet({ tint = BRAND, floorY = -1.28 } = {}) {
     new THREE.PlaneGeometry(3.4, 2.0),
     new THREE.MeshBasicMaterial({
       map: glowTexture(), transparent: true, depthWrite: false,
-      blending: THREE.AdditiveBlending, color: tint, opacity: 0.05,
+      blending: THREE.AdditiveBlending, color: tint, opacity: 0.04,
     }),
   )
   spill.position.set(0, floorY + 0.75, 0.9)
