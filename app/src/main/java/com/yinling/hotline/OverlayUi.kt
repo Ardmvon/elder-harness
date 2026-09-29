@@ -70,25 +70,38 @@ object OverlayUi {
         layoutParams = LinearLayout.LayoutParams(dp(context, 16), dp(context, 16))
     }
 
-    /** A primary (filled) or secondary (outlined) button, at the elder-facing touch size. */
+    /**
+     * A primary (filled) or secondary (outlined) button.
+     *
+     * One shape, one type scale, no elevation: the two used to be a square flat block next to a
+     * rounded raised one, which read as two different apps sharing a window. Shape and radius come
+     * from [Elder], so they match the buttons on the home screen exactly.
+     */
     fun button(
         context: Context,
         label: String,
         primary: Boolean = true,
         onClick: () -> Unit,
+        /** Secondary buttons sit two to a row, so they give up a little type size to fit. */
+        compact: Boolean = false,
     ): Button = Button(context).apply {
         text = label
-        textSize = Elder.body.value
+        textSize = if (primary || !compact) Elder.body.value else Elder.body.value - 2f
         isAllCaps = false
+        // Material's default: a raised, tinted button. Neither belongs on an elder-facing panel.
+        backgroundTintList = null
+        stateListAnimator = null
+        elevation = 0f
+        val radius = dp(context, Elder.radius.value).toFloat()
         if (primary) {
-            setBackgroundColor(Elder.brand.toArgb())
+            background = rounded(brand, radius)
             setTextColor(android.graphics.Color.WHITE)
             setTypeface(null, Typeface.BOLD)
         } else {
-            background = rounded(android.graphics.Color.WHITE, dp(context, Elder.radius.value).toFloat()).apply {
-                setStroke(dp(context, 1), Elder.line.toArgb())
+            background = rounded(android.graphics.Color.WHITE, radius).apply {
+                setStroke(dp(context, 1), line)
             }
-            setTextColor(Elder.brandDeep.toArgb())
+            setTextColor(brandDeep)
         }
         setOnClickListener { onClick() }
         layoutParams = LinearLayout.LayoutParams(
@@ -96,6 +109,10 @@ object OverlayUi {
             dp(context, if (primary) Elder.primaryHeight.value else Elder.secondaryHeight.value),
         ).apply { topMargin = dp(context, 8) }
     }
+
+    /** The outlined variant, for the quieter choices that sit beside a primary action. */
+    fun secondary(context: Context, label: String, onClick: () -> Unit): Button =
+        button(context, label, primary = false, onClick = onClick, compact = true)
 
     /** One tappable answer, given the same weight as a primary action: answering is the whole job. */
     fun option(context: Context, label: String, onClick: () -> Unit): Button =
@@ -151,9 +168,15 @@ object OverlayUi {
     val good: Int get() = Elder.good.toArgb()
     val problem: Int get() = Elder.problem.toArgb()
     val line: Int get() = Elder.line.toArgb()
-    val doneTint: Int get() = 0xFFE8F6F3.toInt()
-    val waitTint: Int get() = 0xFFFDF3E7.toInt()
-    val panel: Int get() = 0xEEFFFFFF.toInt()
+    val doneTint: Int get() = 0xF2E8F6F3.toInt()
+    val waitTint: Int get() = 0xF2FDF3E7.toInt()
+
+    /**
+     * The panel background: solid enough to read a sentence on, because it is read over whatever app
+     * the person happens to be in. The bubble keeps the brand colour; only the expanded card is
+     * opaque, and nothing behind it is blurred.
+     */
+    val panel: Int get() = 0xFAFFFFFF.toInt()
 }
 
 private fun androidx.compose.ui.graphics.Color.toArgb(): Int = android.graphics.Color.argb(

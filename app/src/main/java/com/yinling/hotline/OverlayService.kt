@@ -597,24 +597,25 @@ class OverlayService : Service() {
     private fun optionButton(text: String, onClick: () -> Unit) =
         OverlayUi.option(this, text, onClick)
 
-    /** Two side-by-side secondary actions: the quiet choices, kept below the primary one. */
+    /**
+     * Two side-by-side secondary actions: the quiet choices, kept below the primary one.
+     *
+     * They share the panel's width evenly instead of being fixed-width and left-aligned — the old
+     * pair sat against the left edge with dead space beside it, which reads as a layout mistake.
+     */
     private fun row(card: LinearLayout, first: Pair<String, () -> Unit>, second: Pair<String, () -> Unit>) {
+        val height = dp(Elder.secondaryHeight.value.toInt())
         card.addView(LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            addView(smallAction(first), LinearLayout.LayoutParams(dp(130), dp(50)))
-            addView(smallAction(second), LinearLayout.LayoutParams(dp(130), dp(50)))
+            addView(
+                OverlayUi.secondary(this@OverlayService, first.first, first.second),
+                LinearLayout.LayoutParams(0, height, 1f).apply { rightMargin = dp(5) },
+            )
+            addView(
+                OverlayUi.secondary(this@OverlayService, second.first, second.second),
+                LinearLayout.LayoutParams(0, height, 1f).apply { leftMargin = dp(5) },
+            )
         })
-    }
-
-    private fun smallAction(item: Pair<String, () -> Unit>) = Button(this).apply {
-        text = item.first
-        textSize = Elder.hint.value
-        isAllCaps = false
-        setTextColor(OverlayUi.brandDeep)
-        background = OverlayUi.rounded(android.graphics.Color.WHITE, dp(12).toFloat()).apply {
-            setStroke(dp(1), OverlayUi.line)
-        }
-        setOnClickListener { item.second() }
     }
 
     private fun openHome() {
