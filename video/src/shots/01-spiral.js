@@ -22,6 +22,7 @@ import * as THREE from 'three'
 import { defineShot } from '../stage.js'
 import { makeTextTexture } from '../text.js'
 import { NOISE, COMMON } from '../glsl.js'
+import { makeSparks, sampleGlyphPoints, coilPoint } from '../props.js'
 import { smooth01, easeInOut } from '../ease.js'
 
 const NODES = [
@@ -55,6 +56,10 @@ export const BEATS = {
   labelOutStart: 3.90, labelOutDur: 0.50,
   titleIn: 4.25, titleInDur: 0.85,
   subIn: 4.55, subInDur: 0.85,
+  // The handoff: the title comes apart into sparks that land on the coil. Shot 2 opens with
+  // those same sparks (same formula, same seed) and gathers them into the phone, so the cut
+  // lands mid-motion instead of between two unrelated images.
+  dissolveStart: 5.15, dissolveDur: 0.80,
 }
 
 export const shotSpiral = defineShot({
@@ -260,6 +265,30 @@ export const shotSpiral = defineShot({
     stage.scene.add(title)
     g.userData.title = title
 
+    // --- the title's own glyphs, as sparks, so the title can become the next shot's material.
+    const SPARKS = 4200
+    const titleW = title.scale.x
+    const titleH = title.scale.x / titleTex.userData.aspect
+    const glyphs = sampleGlyphPoints(titleTex, { count: SPARKS, seed: 11 })
+    const sparks = makeSparks({
+      count: SPARKS,
+      seed: 11,
+      spread: 0.035,
+      size: 4.2,
+      from: (i) => [
+        title.position.x + (glyphs[i][0] - 0.5) * titleW,
+        title.position.y + (0.5 - glyphs[i][1]) * titleH,
+        title.position.z,
+      ],
+      to: (i) => {
+        const p = coilPoint(i / SPARKS)
+        return [p.x * GROUP_SCALE, GROUP_Y + p.y * GROUP_SCALE, p.z * GROUP_SCALE]
+      },
+    })
+    stage.scene.add(sparks)
+    g.userData.sparks = sparks
+    g.userData.sparkMat = sparks.userData.mat
+
     const subTex = makeTextTexture({
       text: '可信跨应用助老智能体', size: 44, weight: 400, color: '#7FE3C8', letterSpacing: 8,
     })
@@ -312,9 +341,18 @@ export const shotSpiral = defineShot({
       label.quaternion.copy(stage.camera.quaternion)
     }
 
-    // The wordmark beat.
-    g.userData.title.material.opacity = smooth01(local, B.titleIn, B.titleInDur)
-    g.userData.sub.material.opacity = smooth01(local, B.subIn, B.subInDur)
+    // The wordmark beat, then its exit: the plane gives way to its own sparks. The plane fades
+    // slightly faster than the sparks arrive, so no frame shows both at full strength.
+    const dissolve = smooth01(local, B.dissolveStart, B.dissolveDur)
+    const planeGone = smooth01(local, B.dissolveStart, B.dissolveDur * 0.55)
+    g.userData.title.material.opacity = smooth01(local, B.titleIn, B.titleInDur) * (1 - planeGone)
+    g.userData.sub.material.opacity = smooth01(local, B.subIn, B.subInDur) * (1 - planeGone)
+    if (g.userData.sparkMat) {
+      const u = g.userData.sparkMat.uniforms
+      u.uMorph.value = dissolve
+      u.uTime.value = t
+      u.uOpacity.value = smooth01(local, B.dissolveStart - 0.25, 0.45)
+    }
 
     // --- camera: a slow push in from three-quarters.
     //

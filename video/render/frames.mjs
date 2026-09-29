@@ -33,7 +33,12 @@ const { session } = browser
 try {
   await session.send('Page.enable')
   await session.send('Runtime.enable')
-  await session.send('Page.navigate', { url: server.origin + '/index.html' + (ONLY ? `?shot=${ONLY}` : '') })
+  // ?shot= selects one shot; --query passes render-time switches through to the page
+  // (currently bloom and haze) so a frame can be diagnosed one layer at a time.
+  const query = new URLSearchParams(args.query ?? '')
+  if (ONLY) query.set('shot', ONLY)
+  const url = server.origin + '/index.html' + (query.toString() ? `?${query}` : '')
+  await session.send('Page.navigate', { url })
 
   let ready = false
   for (let i = 0; i < 600 && !ready; i++) {
@@ -66,6 +71,11 @@ try {
     const t = f / FPS
     const dataURL = await evalStr(session, captureExpr(t, FORMAT, QUALITY))
     writeFileSync(join(OUT, `f${String(f).padStart(6, '0')}.${ext}`), decodeDataURL(dataURL))
+    // A shot that throws keeps producing frames — black ones — and the run still "succeeds".
+    // index.html records the error; surfacing it here is the difference between a finished
+    // render and a very fast way to produce 3600 black frames.
+    const pageError = await evalStr(session, 'window.__error || ""').catch(() => '')
+    if (pageError) throw new Error(`shot threw at t=${t.toFixed(2)}: ${pageError.split('\n')[0]}`)
 
     const done = f - first + 1
     if (done % 20 === 0 || f === last - 1) {

@@ -12,7 +12,7 @@ import * as THREE from 'three'
 import { defineShot } from '../stage.js'
 import {
   makePhone, makeSubtitle, makeLabel, makeSoundRing, paintHomeScreen, setGroupOpacity,
-  distanceFor, BRAND, ATTENTION, INK_BG,
+  makeSet, makeMirror, distanceFor, BRAND, ATTENTION, INK_BG,
 } from '../props.js'
 import { smooth01, easeOut } from '../ease.js'
 
@@ -36,9 +36,15 @@ export const shotVoice = defineShot({
     stage.scene.add(group)
 
     // The phone is a quiet backplate here: the subject is what leaves it.
-    const phone = makePhone({ height: 1.9 })
-    phone.position.y = -0.05
+    const set = makeSet()
+    group.add(set)
+
+    const phone = makePhone({ height: 1.8 })
+    phone.position.y = -0.10
     group.add(phone)
+
+    const mirror = makeMirror(phone, { floorY: -1.28, opacity: 0.11 })
+    group.add(mirror)
 
     const rings = [0, 1].map((i) => {
       const ring = makeSoundRing({ radius: 0.42, width: 0.035, color: i === 0 ? BRAND : ATTENTION })
@@ -82,8 +88,12 @@ export const shotVoice = defineShot({
     const group = stage.userData.voice
     const { phone, rings, bubbles, subtitle } = group.userData
 
-    stage.camera.position.set(0, 0.05, distanceFor(stage, 1.9, 0.66))
-    stage.camera.lookAt(0, 0, 0)
+    // A slow arc: the haze layers slide against each other, which is the only reason the depth
+    // is visible at all.
+    const d = distanceFor(stage, 1.9, 0.70)
+    const a = 0.34 * Math.sin(local * 0.40)
+    stage.camera.position.set(d * Math.sin(a), 0.04 + 0.05 * Math.cos(local * 0.55), d * Math.cos(a))
+    stage.camera.lookAt(0, -0.05, 0)
 
     const lit = smooth01(local, 0, 0.6)
     if (group.userData.lastPaint !== 'on') {

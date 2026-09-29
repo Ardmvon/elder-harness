@@ -13,9 +13,13 @@
 
 import * as THREE from 'three'
 import { makeTextTexture } from './text.js'
+import { NOISE } from './glsl.js'
 import { smooth01 } from './ease.js'
 
 export const INK_BG = 0x0e1418
+
+/** Layer 1: anything the audience is meant to read. Rendered after post (see Stage). */
+export const LAYER_UI = 1
 export const BRAND = 0x1a7f6b
 export const BRAND_DEEP = 0x12604f
 export const ATTENTION = 0xc46a14
@@ -77,6 +81,8 @@ export function makePhone({ height = 2.0 } = {}) {
   const surfaceMat = new THREE.MeshBasicMaterial({ map: screenMap, transparent: true, depthWrite: false })
   surfaceMat.toneMapped = false
   const surface = new THREE.Mesh(new THREE.PlaneGeometry(width, height), surfaceMat)
+  // Layer 1: interface. See Stage.renderAt — the screen must not go through bloom.
+  surface.layers.set(LAYER_UI)
   surface.position.z = 0.001
   group.add(surface)
 
@@ -98,6 +104,7 @@ export function makePhone({ height = 2.0 } = {}) {
   group.userData = {
     width,
     height,
+    body,
     surface,
     rim,
     screenCtx,
@@ -128,6 +135,107 @@ export function glowTexture() {
   return tex
 }
 
+/** A horizontal band: bright in the middle, gone at both ends. A horizon light, not a blob. */
+export function bandTexture() {
+  const w = 512
+  const h = 64
+  const canvas = document.createElement('canvas')
+  canvas.width = w
+  canvas.height = h
+  const ctx = canvas.getContext('2d')
+  const grd = ctx.createLinearGradient(0, 0, w, 0)
+  grd.addColorStop(0.0, 'rgba(255,255,255,0)')
+  grd.addColorStop(0.35, 'rgba(255,255,255,0.55)')
+  grd.addColorStop(0.5, 'rgba(255,255,255,1)')
+  grd.addColorStop(0.65, 'rgba(255,255,255,0.55)')
+  grd.addColorStop(1.0, 'rgba(255,255,255,0)')
+  ctx.fillStyle = grd
+  ctx.fillRect(0, 0, w, h)
+  // Fade vertically too, so the band has no hard top or bottom edge.
+  const vgrd = ctx.createLinearGradient(0, 0, 0, h)
+  vgrd.addColorStop(0.0, 'rgba(0,0,0,1)')
+  vgrd.addColorStop(0.5, 'rgba(0,0,0,0)')
+  vgrd.addColorStop(1.0, 'rgba(0,0,0,1)')
+  ctx.globalCompositeOperation = 'destination-out'
+  ctx.fillStyle = vgrd
+  ctx.fillRect(0, 0, w, h)
+  const tex = new THREE.CanvasTexture(canvas)
+  tex.colorSpace = THREE.SRGBColorSpace
+  return tex
+}
+
+/** Deterministic RNG: two shots that must match across a cut have to agree on every number. */
+export function mulberry32(seed) {
+  let a = seed >>> 0
+  return function () {
+    a |= 0
+    a = (a + 0x6D2B79F5) | 0
+    let t = Math.imul(a ^ (a >>> 15), 1 | a)
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+  }
+}
+
+/** The film's coil. Shot 1 and shot 2 must both use this exact formula, or the cut will show. */
+export const COIL = { turns: 1.5, height: 3.6, r0: 0.50, r1: 1.65 }
+export function coilPoint(u, out = new THREE.Vector3()) {
+  const ang = u * Math.PI * 2 * COIL.turns
+  const rad = COIL.r0 + u * (COIL.r1 - COIL.r0)
+  return out.set(Math.cos(ang) * rad, (u - 0.5) * COIL.height, Math.sin(ang) * rad)
+}
+
+/** Points along a rounded rectangle's outline, in that rectangle's own plane. */
+export function phoneOutlinePoints(n, { width, height, radius = 0.10 } = {}) {
+  const pts = []
+  const hw = width / 2
+  const hh = height / 2
+  const r = Math.min(radius, hw * 0.9, hh * 0.9)
+  const straightV = 2 * (hh - r)
+  const straightH = 2 * (hw - r)
+  const arc = (Math.PI / 2) * r
+  const total = 2 * straightV + 2 * straightH + 4 * arc
+  for (let i = 0; i < n; i++) {
+    let d = (i / n) * total
+    let x = 0
+    let y = 0
+    if (d < straightV) { x = hw; y = -hh + r + d }
+    else if ((d -= straightV) < arc) { const a = -Math.PI / 2 + (d / arc) * (Math.PI / 2); x = hw - r + Math.cos(a) * r; y = hh - r + Math.sin(a) * r }
+    else if ((d -= arc) < straightH) { x = hw - r - d; y = hh }
+    else if ((d -= straightH) < arc) { const a = (d / arc) * (Math.PI / 2); x = -hw + r + Math.cos(a) * r; y = hh - r + Math.sin(a) * r }
+    else if ((d -= arc) < straightV) { x = -hw; y = hh - r - d }
+    else if ((d -= straightV) < arc) { const a = Math.PI / 2 + (d / arc) * (Math.PI / 2); x = -hw + r + Math.cos(a) * r; y = -hh + r + Math.sin(a) * r }
+    else if ((d -= arc) < straightH) { x = -hw + r + d; y = -hh }
+    else { d -= straightH; const a = Math.PI + (d / arc) * (Math.PI / 2); x = hw - r + Math.cos(a) * r; y = -hh + r + Math.sin(a) * r }
+    pts.push(new THREE.Vector3(x, y, 0))
+  }
+  return pts
+}
+
+/**
+ * A camera move, as keys rather than as a slider.
+ *
+ * Every key is eased by default. A camera that interpolates linearly is the most common
+ * reason an otherwise decent render reads as a slideshow.
+ */
+export function camKey(t, keys) {
+  if (t <= keys[0].at) return { x: keys[0].x ?? 0, y: keys[0].y ?? 0, z: keys[0].z }
+  for (let i = 0; i < keys.length - 1; i++) {
+    const a = keys[i]
+    const b = keys[i + 1]
+    if (t >= a.at && t <= b.at) {
+      const raw = (t - a.at) / Math.max(1e-6, b.at - a.at)
+      const e = (a.ease ?? ((x) => x * x * (3 - 2 * x)))(raw)
+      return {
+        x: (a.x ?? 0) + ((b.x ?? 0) - (a.x ?? 0)) * e,
+        y: (a.y ?? 0) + ((b.y ?? 0) - (a.y ?? 0)) * e,
+        z: a.z + (b.z - a.z) * e,
+      }
+    }
+  }
+  const last = keys[keys.length - 1]
+  return { x: last.x ?? 0, y: last.y ?? 0, z: last.z }
+}
+
 /**
  * A flat billboard carrying Chinese text.
  *
@@ -143,6 +251,7 @@ export function makeLabel(text, { px = 40, color = '#FFFFFF', weight = 500, worl
   const labelMat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false })
   labelMat.toneMapped = false
   const mesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1 / tex.userData.aspect), labelMat)
+  mesh.layers.set(LAYER_UI)
   // userData.height is the plate height in CSS px (text + padding), so this maps the
   // measured plate onto the frame at exactly the requested scale.
   const heightUnits = worldHeight ?? (tex.userData.height * (2 / 1080))
@@ -168,6 +277,7 @@ export function makeCard(width = 1.5, height = 0.62, opacity = 0.93) {
   const plateMat = new THREE.MeshBasicMaterial({ map, transparent: true, depthWrite: false })
   plateMat.toneMapped = false
   const plate = new THREE.Mesh(new THREE.PlaneGeometry(width, height), plateMat)
+  plate.layers.set(LAYER_UI)
   group.add(plate)
   group.userData = { width, height, plate }
   return group
@@ -322,4 +432,220 @@ export function distanceFor(stage, height, fill = 0.8) {
 /** Fade a shot's group in at its start and out at its end, without state. */
 export function windowFade(local, duration, inDur = 0.5, outDur = 0.5) {
   return smooth01(local, 0, inDur) * (1 - smooth01(local, duration - outDur, outDur))
+}
+
+/**
+ * The set: a space for the phone to exist in.
+ *
+ * Shots 2-3 first looked like a phone pasted on black — no floor, no haze, no light in the
+ * air. Cinematographically the missing thing was not decoration: without a space there is
+ * nothing for the camera move to be *against*, so a dolly reads as nothing happening.
+ *
+ * Everything here is additive or very dark, so it never competes with the screen.
+ */
+export function makeSet({ tint = BRAND, floorY = -1.28 } = {}) {
+  const group = new THREE.Group()
+  const params = new URLSearchParams(globalThis.location?.search || '')
+  if (params.get('haze') === '0') return group
+
+  // Haze: three planes at different depths. Parallax between them is what sells the depth.
+  // A horizon band instead of haze blobs. Three round glows behind a near-black frame added up
+  // to a grey wall — diagnosed by rendering the same frame with ?haze=0, which came out black.
+  // A wide, short band separates the phone from the background without lifting the black level.
+  const horizon = new THREE.Mesh(
+    new THREE.PlaneGeometry(9.5, 1.5),
+    new THREE.MeshBasicMaterial({
+      map: bandTexture(), transparent: true, depthWrite: false,
+      blending: THREE.AdditiveBlending, color: tint, opacity: 0.42,
+    }),
+  )
+  horizon.position.set(0, -0.62, -2.4)
+  group.add(horizon)
+
+  const horizonWide = new THREE.Mesh(
+    new THREE.PlaneGeometry(16, 0.5),
+    new THREE.MeshBasicMaterial({
+      map: bandTexture(), transparent: true, depthWrite: false,
+      blending: THREE.AdditiveBlending, color: 0x2E5F7A, opacity: 0.22,
+    }),
+  )
+  horizonWide.position.set(0, -1.02, -3.6)
+  group.add(horizonWide)
+
+  // Floor: a gradient that is darkest under the phone, so the eye goes to the screen.
+  const floorCanvas = document.createElement('canvas')
+  floorCanvas.width = 512
+  floorCanvas.height = 256
+  const fctx = floorCanvas.getContext('2d')
+  // The far edge blends into the background rather than ending in a visible line: a hard
+  // horizon at mid-frame reads as a wall, and there is no wall in this scene.
+  const grd = fctx.createLinearGradient(0, 0, 0, 256)
+  grd.addColorStop(0, 'rgba(14,20,24,1)')
+  grd.addColorStop(0.35, 'rgba(17,26,31,1)')
+  grd.addColorStop(0.75, 'rgba(12,18,22,1)')
+  grd.addColorStop(1, 'rgba(9,13,16,1)')
+  fctx.fillStyle = grd
+  fctx.fillRect(0, 0, 512, 256)
+  const floorMap = new THREE.CanvasTexture(floorCanvas)
+  floorMap.colorSpace = THREE.SRGBColorSpace
+  const floor = new THREE.Mesh(
+    new THREE.PlaneGeometry(40, 26),
+    new THREE.MeshBasicMaterial({ map: floorMap }),
+  )
+  floor.rotation.x = -Math.PI / 2
+  floor.position.y = floorY
+  group.add(floor)
+
+  // Screen spill: the phone's light falling on the space in front of it. Without this the
+  // device looks emissive in a vacuum, which is exactly how a mockup looks.
+  const spill = new THREE.Mesh(
+    new THREE.PlaneGeometry(3.4, 2.0),
+    new THREE.MeshBasicMaterial({
+      map: glowTexture(), transparent: true, depthWrite: false,
+      blending: THREE.AdditiveBlending, color: tint, opacity: 0.05,
+    }),
+  )
+  spill.position.set(0, floorY + 0.75, 0.9)
+  group.add(spill)
+
+  group.userData = { haze: [horizon, horizonWide], floor, spill }
+  return group
+}
+
+/** A mirrored, dimmed copy below the floor: enough for the eye to read a surface. */
+export function makeMirror(object, { floorY = -1.28, opacity = 0.16 } = {}) {
+  const clone = object.clone(true)
+  clone.traverse((o) => {
+    if (!o.material) return
+    // Clone the materials: sharing them would make the reflection's opacity edits change
+    // the phone itself.
+    const src = Array.isArray(o.material) ? o.material : [o.material]
+    const copy = src.map((m) => {
+      const c = m.clone()
+      c.opacity = (m.opacity ?? 1) * opacity
+      c.transparent = true
+      c.depthWrite = false
+      return c
+    })
+    o.material = Array.isArray(o.material) ? copy : copy[0]
+  })
+  clone.scale.y *= -1
+  clone.position.y = 2 * floorY - object.position.y
+  return clone
+}
+
+/**
+ * Sample a text texture into points, so a title can come apart into sparks.
+ *
+ * The alternative — animating the plane's opacity — reads as a dissolve, which is a different
+ * (and much cheaper-looking) idea. Breaking the glyphs themselves is what makes the title
+ * *become* the next image instead of being replaced by it.
+ */
+export function sampleGlyphPoints(texture, { count = 4200, threshold = 0.55, seed = 7 } = {}) {
+  const canvas = texture.image
+  const ctx = canvas.getContext('2d')
+  const { width, height } = canvas
+  const data = ctx.getImageData(0, 0, width, height).data
+
+  const hits = []
+  const step = 2
+  for (let y = 0; y < height; y += step) {
+    for (let x = 0; x < width; x += step) {
+      if (data[(y * width + x) * 4 + 3] / 255 > threshold) hits.push([x, y])
+    }
+  }
+
+  const rnd = mulberry32(seed)
+  const points = []
+  for (let i = 0; i < count; i++) {
+    const [sx, sy] = hits.length ? hits[Math.floor(rnd() * hits.length)] : [width / 2, height / 2]
+    points.push([sx / width, sy / height])
+  }
+  return points
+}
+
+/**
+ * A field of sparks that can be morphed between two shapes.
+ *
+ * Used for the two halves of the film's one true match cut: the title's glyphs collapse onto
+ * the coil at the end of shot 1, and the same field (same seed, same formula) gathers the coil
+ * into the phone's outline at the start of shot 2. Both halves are additive points with the
+ * same noise curl, so the cut lands mid-motion and the eye reads it as one continuous move.
+ */
+export function makeSparks({ count, from, to, seed = 7, spread = 0.05, size = 3.4 } = {}) {
+  const rnd = mulberry32(seed)
+  const positions = new Float32Array(count * 3)
+  const targets = new Float32Array(count * 3)
+  const seeds = new Float32Array(count)
+  for (let i = 0; i < count; i++) {
+    const f = from(i, rnd)
+    const g = to(i, rnd)
+    positions[i * 3 + 0] = f[0] + (rnd() - 0.5) * spread
+    positions[i * 3 + 1] = f[1] + (rnd() - 0.5) * spread
+    positions[i * 3 + 2] = f[2] + (rnd() - 0.5) * spread
+    targets[i * 3 + 0] = g[0] + (rnd() - 0.5) * spread * 0.7
+    targets[i * 3 + 1] = g[1] + (rnd() - 0.5) * spread * 0.7
+    targets[i * 3 + 2] = g[2] + (rnd() - 0.5) * spread * 0.7
+    seeds[i] = rnd()
+  }
+
+  const geo = new THREE.BufferGeometry()
+  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+  geo.setAttribute('aTarget', new THREE.BufferAttribute(targets, 3))
+  geo.setAttribute('aSeed', new THREE.BufferAttribute(seeds, 1))
+
+  const mat = new THREE.ShaderMaterial({
+    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+    uniforms: {
+      uMorph: { value: 0 }, uOpacity: { value: 1 }, uTime: { value: 0 },
+      uSize: { value: size },
+      uBrand: { value: new THREE.Color(0x9FF3DC) },
+      uDeep: { value: new THREE.Color(BRAND) },
+    },
+    vertexShader: /* glsl */`
+      attribute vec3 aTarget;
+      attribute float aSeed;
+      uniform float uMorph, uTime, uSize;
+      varying float vGlow;
+      varying float vSeed;
+      ${NOISE}
+      void main() {
+        // Per-particle stagger so the shape does not slide as one rigid block.
+        float m = clamp((uMorph - aSeed * 0.25) / 0.75, 0.0, 1.0);
+        float e = m * m * (3.0 - 2.0 * m);
+        vec3 pos = mix(position, aTarget, e);
+        float curl = (1.0 - e) * 0.22;
+        pos += vec3(
+          snoise(pos * 0.7 + uTime * 0.3 + aSeed * 9.0),
+          snoise(pos * 0.7 + uTime * 0.3 + aSeed * 9.0 + 21.7),
+          snoise(pos * 0.7 + uTime * 0.3 + aSeed * 9.0 + 51.3)
+        ) * curl;
+        vec4 mv = modelViewMatrix * vec4(pos, 1.0);
+        gl_Position = projectionMatrix * mv;
+        gl_PointSize = uSize * (1.0 + aSeed) * (6.0 / -mv.z);
+        vGlow = mix(0.5, 1.0, smoothstep(-16.0, -4.0, mv.z));
+        vSeed = aSeed;
+      }
+    `,
+    fragmentShader: /* glsl */`
+      uniform float uOpacity;
+      uniform vec3 uBrand, uDeep;
+      varying float vGlow;
+      varying float vSeed;
+      void main() {
+        float d = length(gl_PointCoord - 0.5) * 2.0;
+        float core = 1.0 - smoothstep(0.0, 1.0, d);
+        float halo = pow(core, 3.0);
+        vec3 col = mix(uDeep, uBrand, vSeed) * (0.55 + 1.3 * vGlow);
+        col += vec3(0.35, 0.85, 0.75) * halo * 0.5;
+        float alpha = (core * 0.5 + halo * 0.9) * vGlow * uOpacity;
+        if (alpha < 0.002) discard;
+        gl_FragColor = vec4(col, alpha);
+      }
+    `,
+  })
+
+  const points = new THREE.Points(geo, mat)
+  points.userData = { mat, geo }
+  return points
 }
