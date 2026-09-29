@@ -42,6 +42,10 @@ export class Stage {
 
     this.shots = new Map()
     this.active = null
+
+    // Scratch space for shots: cross-shot objects (the phone slab, the accessibility
+    // tree, the subtitle plate) live here so one shot can hand something to the next.
+    this.userData = {}
   }
 
   add(shot) {
