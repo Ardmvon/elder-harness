@@ -24,6 +24,9 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Call
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Mic
@@ -44,6 +47,9 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -62,9 +68,17 @@ class MainActivity : ComponentActivity() {
     private val session get() = (application as HotlineApp).session
     private var permissionVersion by mutableIntStateOf(0)
 
-    /** Whether this phone has anything that can turn speech into text. */
+    /**
+     * Whether this phone can turn speech into text for us.
+     *
+     * Speech recognition is a *service* on Android (`RecognitionService`), not an activity, so the
+     * official check is used first; the activity form is only a fallback for phones that ship the
+     * old system dialog. A phone whose keyboard has a microphone but which exposes no service — this
+     * one — correctly reports false, and the button offers the keyboard route instead.
+     */
     private fun hasSpeechRecognizer(): Boolean = runCatching {
-        packageManager.queryIntentActivities(Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH), 0).isNotEmpty()
+        android.speech.SpeechRecognizer.isRecognitionAvailable(this) ||
+            packageManager.queryIntentActivities(Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH), 0).isNotEmpty()
     }.getOrDefault(false)
 
     /**
@@ -153,7 +167,7 @@ class MainActivity : ComponentActivity() {
                                     voiceBroken = true
                                     Toast.makeText(
                                         this,
-                                        "这台手机没有语音识别，请打字告诉它。",
+                                        "这个手机不能直接听，请用键盘上的话筒说话，或打字。",
                                         Toast.LENGTH_LONG,
                                     ).show()
                                 }
@@ -290,23 +304,48 @@ private fun HomePage(
 
             Spacer(Modifier.height(Elder.gap))
 
+            // The circle always means "the one obvious thing to do now". It used to be a dead
+            // control whenever a task was paused: tapping it opened an input that was only rendered
+            // when no task existed, so the biggest button on the screen did nothing.
+            val resumable = state.phase == TaskPhase.PAUSED ||
+                state.phase == TaskPhase.NEEDS_PERSON ||
+                state.phase == TaskPhase.NEEDS_FAMILY ||
+                state.phase == TaskPhase.CANNOT
+            val circleCaption = when {
+                busy -> "停下来"
+                state.phase == TaskPhase.COMPLETED -> "知道了"
+                resumable -> "接着办"
+                voiceAvailable -> "说给接线员听"
+                else -> "打字或说话"
+            }
+            val circleHint = when {
+                busy -> "正在办事，点一下就停"
+                state.phase == TaskPhase.COMPLETED -> "这件事办好了"
+                resumable -> "上次这件事还没办完"
+                voiceAvailable -> "点一下，说出您要办的事"
+                else -> "点键盘上的话筒就能说话，也可以打字"
+            }
             ElderVoiceCircle(
-                caption = when {
-                    busy -> "停下来"
-                    // Chinese OEM phones frequently ship no system speech recogniser at all. Offering
-                    // a button that throws when pressed is worse than offering the one that works.
-                    voiceAvailable -> "说给接线员听"
-                    else -> "打字告诉它"
-                },
-                hint = when {
-                    busy -> "正在办事，点一下就停"
-                    voiceAvailable -> "点一下，说出您要办的事"
-                    else -> "这台手机没有语音识别，请打字（或点键盘上的话筒说话）"
-                },
+                caption = circleCaption,
+                hint = circleHint,
                 listening = false,
                 busy = busy,
-                icon = if (voiceAvailable) Icons.Default.Mic else Icons.Default.Edit,
-                onClick = { if (busy) onFinish() else if (voiceAvailable) onVoice() else typing = true },
+                icon = when {
+                    busy -> Icons.Default.Close
+                    state.phase == TaskPhase.COMPLETED -> Icons.Default.Check
+                    resumable -> Icons.Default.KeyboardArrowRight
+                    voiceAvailable -> Icons.Default.Mic
+                    else -> Icons.Default.Edit
+                },
+                onClick = {
+                    when {
+                        busy -> onFinish()
+                        state.phase == TaskPhase.COMPLETED -> onFinish()
+                        resumable -> onResumeTask()
+                        voiceAvailable -> onVoice()
+                        else -> typing = true
+                    }
+                },
             )
 
             Spacer(Modifier.height(Elder.gap))
@@ -348,13 +387,15 @@ private fun HomePage(
                 }
             }
 
-            if (!hasTask && typing) {
+            if (typing) {
                 ElderCard {
+                    val focus = remember { FocusRequester() }
+                    LaunchedEffect(Unit) { runCatching { focus.requestFocus() } }
                     OutlinedTextField(
                         value = request,
                         onValueChange = onRequest,
                         label = { Text("写下要办的事") },
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier.fillMaxWidth().focusRequester(focus),
                         minLines = 2,
                         textStyle = MaterialTheme.typography.bodyLarge.copy(fontSize = Elder.body),
                     )

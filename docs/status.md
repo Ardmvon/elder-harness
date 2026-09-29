@@ -165,11 +165,21 @@
 | 事实 | 证据 | 后果 |
 |---|---|---|
 | **没有系统语音识别** | `pm query-activities -a android.speech.action.RECOGNIZE_SPEECH` → **0 个** | 点语音按钮会抛 `ActivityNotFoundException` **直接崩掉**。现在：探测不到 / 启动失败就永久降级为"打字告诉它"（提示可用键盘上的话筒），并保证不再崩 |
-| **没有可用的语音引擎** | `settings get secure tts_default_synth` → `null`；应用侧 `getEngines()` 返回**空**（即便系统里装着 OPPO 的引擎） | **语音播报在这台手机上无法工作**。设置页如实显示状态 + 一键跳到系统"文字转语音"设置；引擎可用时自动选用 |
+| **语音播报（TTS）已可用** | `[speak] 使用引擎：系统默认` → `开始朗读` → `朗读完成`（`onDone` 在播放结束后触发，即真的合成并播出了） | 结论：**能朗读**。设置页显示引擎状态，并可一键跳系统"文字转语音" |
 
-结论：**"语音"在国产 ROM 上不是默认能力**。要真正让语音可用，只有三条路——让家人装语音引擎
-（零代码、有安装负担）／自带离线语音（sherpa-onnx 之类，几十 MB）／走服务端云语音（有成本、
-音频出设备）。这条要先定，再谈"语音优先"。
+**曾经的误判与真正的根因（值得记下）**：一度以为"这台手机没有语音引擎"——`tts_default_synth=null`，
+而且应用侧 `getEngines()` 返回空。真正原因是 **Android 11 的包可见性**：应用不声明
+`<queries><intent><action android:name="android.intent.action.TTS_SERVICE"/></intent></queries>`
+就**看不到也绑不上**任何语音引擎（`adb shell pm query-services` 能查到，应用查不到）。
+补上声明后默认引擎直接可用。教训：**"应用查不到" ≠ "系统没有"**，尤其是 Android 11 之后的所有
+`queryIntent*`；本项目还有一处同类查询（识别）已一并声明。
+
+**语音识别仍是"键盘里的话筒"**：这台手机没有注册 `RecognitionService`（`SpeechRecognizer.
+isRecognitionAvailable` = false），也没有 `RECOGNIZE_SPEECH` 的 Activity；语音输入只存在于
+百度输入法键盘内与小布助手里，不对外开放。所以首页的圆按钮在这类手机上显示"打字或说话"，
+点开即聚焦输入框（键盘与话筒立刻出现），提示"点键盘上的话筒就能说话，也可以打字"。
+要真正做到"应用内直接听"，只有三条路——自带离线识别（sherpa-onnx 之类，几十 MB）／
+走服务端云识别（有成本、音频出设备）／依赖系统服务（这台没有）。
 
 ## 家人与社区（M1 已实现，真机验证）
 

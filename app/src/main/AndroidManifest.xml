@@ -17,6 +17,17 @@
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.LAUNCHER" />
         </intent>
+        <!--
+          Android 11+ hides other packages unless they are declared here. Without the TTS entry the
+          app cannot see the speech engines that are installed (the shell could, the app could not),
+          so it concluded there was no engine at all while a perfectly good one sat on the phone.
+        -->
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE" />
+        </intent>
+        <intent>
+            <action android:name="android.speech.RecognitionService" />
+        </intent>
     </queries>
 
     <application
