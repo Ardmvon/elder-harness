@@ -48,6 +48,10 @@ class VoiceRecorder {
     var isRecording: Boolean = false
         private set
 
+    /** Loudest chunk of the last recording; kept for tuning the speech gate from the log. */
+    @Volatile
+    private var lastPeakRms = 0.0
+
     /**
      * @param source `VOICE_RECOGNITION` for a person talking to the phone (it is tuned for speech and
      *   cancels the phone's own output), `MIC` when the sound comes from the phone itself — which is
@@ -87,6 +91,7 @@ class VoiceRecorder {
             return false
         }
         collected.reset()
+        lastPeakRms = 0.0
         record = recorder
         isRecording = true
         recorder.startRecording()
@@ -106,6 +111,7 @@ class VoiceRecorder {
                     // pretending to be a real VAD. Speech has to be seen first, so a quiet room does
                     // not end the recording before anything was said.
                     val rms = rmsOf(chunk, read)
+                    if (rms > lastPeakRms) lastPeakRms = rms
                     val millis = read / 2 * 1000 / SAMPLE_RATE
                     if (rms > SPEECH_RMS) {
                         if (!heardVoice) onSpeechStart?.invoke()
@@ -140,7 +146,9 @@ class VoiceRecorder {
         }
         record = null
         val bytes = synchronized(collected) { collected.toByteArray() }
-        LoopLog.event("[voice] 录音结束 ${bytes.size / 2 / (SAMPLE_RATE / 1000)}ms")
+        LoopLog.event(
+            "[voice] 录音结束 ${bytes.size / 2 / (SAMPLE_RATE / 1000)}ms 峰值音量=${lastPeakRms.toInt()}",
+        )
         return bytes
     }
 

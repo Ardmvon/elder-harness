@@ -208,6 +208,12 @@ class OverlayService : Service() {
     }
 
     private fun render(state: SessionState) {
+        // Defence in depth: several callers are callbacks from audio threads, and a floating panel
+        // touched from the wrong thread takes the whole process down.
+        if (android.os.Looper.myLooper() != android.os.Looper.getMainLooper()) {
+            if (::root.isInitialized) root.post { render(state) }
+            return
+        }
         val phaseChanged = state.phase != lastPhase
 
         // Anything that waits for the person opens the panel by itself — but only when the
@@ -225,7 +231,10 @@ class OverlayService : Service() {
             openedWhileWorking = false
         }
 
-        val shape = "${state.phase}|$expanded|${state.goal}|${state.message}|${state.options}"
+        // The conversation state belongs in here: without it the panel kept the old microphone label
+        // and gave no sign that it had started listening, so the button looked dead.
+        val shape = "${state.phase}|$expanded|${state.goal}|${state.message}|${state.options}|" +
+            "${session.voice.state.value}"
         if (shape == lastShape) {
             // Same shape, but the run may have moved on a step: that is what the bubble shows.
             bubble?.text = pillLabel(state)
