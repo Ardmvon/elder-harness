@@ -25,7 +25,7 @@ from typing import Any
 from fastapi import Body, Cookie, FastAPI, Form, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
-from . import db, notify, watch, web
+from . import db, notify, speech, watch, web
 
 log = logging.getLogger("hotline")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -40,6 +40,10 @@ SILENCE_SECONDS = int(os.environ.get("HOTLINE_SILENCE_SECONDS", str(watch.DEFAUL
 async def lifespan(app: FastAPI):
     import asyncio
 
+    # Credentials for the model and for speech live here, never in the phone.
+    from . import load_env
+
+    load_env(os.path.join(os.path.dirname(__file__), "..", ".env"))
     db.init()
     task = asyncio.create_task(watch.run_forever(interval_seconds=300, silence_seconds=SILENCE_SECONDS))
     try:
@@ -107,6 +111,31 @@ def heartbeat(
             for event in pending
         ],
     }
+
+
+@app.get("/api/speech/status")
+def speech_status() -> dict[str, Any]:
+    """Whether this server can turn speech into text; the phone asks before offering to listen."""
+    return {"configured": speech.is_configured(), "style": speech.style()}
+
+
+@app.post("/api/device/transcribe")
+async def transcribe(
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Raw 16 kHz mono PCM16 in the body, text out. The phone records; the server holds the keys."""
+    device = device_from_auth(authorization)
+    pcm = await request.body()
+    if len(pcm) < speech.SAMPLE_RATE:  # under ~30ms of audio is a mis-tap, not a sentence
+        return {"text": ""}
+    try:
+        text = await speech.transcribe(pcm, keyterms=[device["elder_name"]] if device["elder_name"] else None)
+    except speech.SpeechError as error:
+        log.warning("[speech] device=%s 失败：%s", device["id"], error)
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    log.info("[speech] device=%s %d 字节 → %r", device["id"], len(pcm), text[:40])
+    return {"text": text}
 
 
 @app.post("/api/device/events")

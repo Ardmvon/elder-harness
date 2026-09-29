@@ -103,12 +103,58 @@ class MainActivity : ComponentActivity() {
         startOverlay()
         setContent {
             val state by session.state.collectAsState()
+            val hotline = application as HotlineApp
+            val scope = rememberCoroutineScope()
             var settings by remember { mutableStateOf(false) }
             var request by remember { mutableStateOf(state.goal) }
+            // Server-side recognition (iFlytek, through our server) beats the phone's own: this phone
+            // owns neither a RecognitionService nor a usable engine, so its keyboard is all it has.
+            var canListen by remember(permissionVersion) {
+                mutableStateOf(session.server.isConfigured() && session.server.speechEnabled)
+            }
+            var listening by remember { mutableStateOf(false) }
+            var transcribing by remember { mutableStateOf(false) }
             // A phone can claim to have a speech recogniser and still fail to start it; once that has
             // happened, stop offering it and say what to do instead.
             var voiceBroken by remember { mutableStateOf(false) }
             var answer by remember { mutableStateOf("") }
+            val micPermission = rememberLauncherForActivityResult(
+                ActivityResultContracts.RequestPermission(),
+            ) { granted ->
+                if (granted) listening = hotline.recorder.start()
+            }
+            LaunchedEffect(Unit) {
+                runCatching { session.server.refreshSpeechStatus() }
+                canListen = session.server.isConfigured() && session.server.speechEnabled
+            }
+            // Ends an utterance: tapped again, or ended by itself when the person stops talking.
+            val stopAndTranscribe: () -> Unit = {
+                if (listening) {
+                    listening = false
+                    val pcm = hotline.recorder.stop()
+                    if (pcm.size < 8000) {
+                        Toast.makeText(this, "没听到声音，再点一下说一遍。", Toast.LENGTH_LONG).show()
+                    } else {
+                        transcribing = true
+                        scope.launch {
+                            val heard = session.server.transcribe(pcm)
+                            transcribing = false
+                            if (heard.isNullOrBlank()) {
+                                Toast.makeText(
+                                    this@MainActivity,
+                                    "没听清（${session.server.lastResult.ifBlank { "没有识别结果" }}）",
+                                    Toast.LENGTH_LONG,
+                                ).show()
+                            } else {
+                                request = heard
+                                startOverlay()
+                                session.start(heard)
+                                moveTaskToBack(true)
+                            }
+                        }
+                    }
+                }
+            }
             val voice = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
                 val said = it.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
                     ?.firstOrNull()?.trim().orEmpty()
@@ -147,6 +193,26 @@ class MainActivity : ComponentActivity() {
                             overlayReady = remember(tick) { Settings.canDrawOverlays(this) },
                             accessReady = remember(tick) { ScreenAccessService.active != null },
                             voiceAvailable = remember(tick) { !voiceBroken && hasSpeechRecognizer() },
+                            canListen = canListen,
+                            listening = listening,
+                            transcribing = transcribing,
+                            onListen = {
+                                if (listening) {
+                                    stopAndTranscribe()
+                                } else if (
+                                    checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) !=
+                                    android.content.pm.PackageManager.PERMISSION_GRANTED
+                                ) {
+                                    micPermission.launch(android.Manifest.permission.RECORD_AUDIO)
+                                } else {
+                                    listening = hotline.recorder.start(
+                                        onAutoStop = { scope.launch { stopAndTranscribe() } },
+                                    )
+                                    if (!listening) {
+                                        Toast.makeText(this, "麦克风用不了，请打字告诉它。", Toast.LENGTH_LONG).show()
+                                    }
+                                }
+                            },
                             onOverlayPermission = {
                                 startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION))
                             },
@@ -265,6 +331,10 @@ private fun HomePage(
     overlayReady: Boolean,
     accessReady: Boolean,
     voiceAvailable: Boolean,
+    canListen: Boolean,
+    listening: Boolean,
+    transcribing: Boolean,
+    onListen: () -> Unit,
     onOverlayPermission: () -> Unit,
     onAccessPermission: () -> Unit,
     onVoice: () -> Unit,
@@ -312,16 +382,21 @@ private fun HomePage(
                 state.phase == TaskPhase.NEEDS_FAMILY ||
                 state.phase == TaskPhase.CANNOT
             val circleCaption = when {
+                listening -> "正在听…"
+                transcribing -> "正在听懂…"
                 busy -> "停下来"
                 state.phase == TaskPhase.COMPLETED -> "知道了"
                 resumable -> "接着办"
-                voiceAvailable -> "说给接线员听"
+                canListen || voiceAvailable -> "说给接线员听"
                 else -> "打字或说话"
             }
             val circleHint = when {
+                listening -> "说完就停，或再点一下"
+                transcribing -> "稍等一下"
                 busy -> "正在办事，点一下就停"
                 state.phase == TaskPhase.COMPLETED -> "这件事办好了"
                 resumable -> "上次这件事还没办完"
+                canListen -> "点一下开始说话"
                 voiceAvailable -> "点一下，说出您要办的事"
                 else -> "点键盘上的话筒就能说话，也可以打字"
             }
@@ -332,16 +407,20 @@ private fun HomePage(
                 busy = busy,
                 icon = when {
                     busy -> Icons.Default.Close
+                    listening || transcribing -> Icons.Default.Mic
                     state.phase == TaskPhase.COMPLETED -> Icons.Default.Check
                     resumable -> Icons.Default.KeyboardArrowRight
-                    voiceAvailable -> Icons.Default.Mic
+                    canListen || voiceAvailable -> Icons.Default.Mic
                     else -> Icons.Default.Edit
                 },
                 onClick = {
                     when {
+                        listening -> onListen()
+                        transcribing -> Unit
                         busy -> onFinish()
                         state.phase == TaskPhase.COMPLETED -> onFinish()
                         resumable -> onResumeTask()
+                        canListen -> onListen()
                         voiceAvailable -> onVoice()
                         else -> typing = true
                     }
@@ -748,11 +827,20 @@ private fun ServerSection() {
             )
         }
         Text(remember(tick) { server.lastResult.ifBlank { "还没联系过服务器" } }, fontSize = 15.sp)
+        Text(
+            remember(tick) {
+                if (!server.isConfigured()) "语音识别：服务器还没配对"
+                else if (server.speechEnabled) "语音识别：可用（服务器转写，密钥不在手机上）"
+                else "语音识别：服务端未配置讯飞密钥"
+            },
+            fontSize = 15.sp,
+        )
         OutlinedButton(
             onClick = {
                 busy = true
                 scope.launch {
                     runCatching { server.heartbeat("手动联系") }
+                    runCatching { server.refreshSpeechStatus() }
                     busy = false
                     tick++
                 }

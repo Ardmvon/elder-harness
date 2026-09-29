@@ -74,7 +74,87 @@ class ServerClient(private val app: HotlineApp) {
             prefs.edit().putString("server_last_result", value).apply()
         }
 
+    /**
+     * Whether the server said it can turn speech into text. Optimistic until told otherwise: the
+     * phone asks at startup and after every heartbeat, and a missing answer must not remove the
+     * microphone from someone who needs it.
+     */
+    var speechEnabled: Boolean
+        get() = prefs.getBoolean("speech_enabled", true)
+        private set(value) {
+            prefs.edit().putBoolean("speech_enabled", value).apply()
+        }
+
     fun isConfigured(): Boolean = baseUrl.isNotBlank() && token.isNotBlank()
+
+    /** Asks the server whether it has speech recognition configured at all. */
+    suspend fun refreshSpeechStatus(): Boolean = withContext(Dispatchers.IO) {
+        if (!isConfigured()) return@withContext false
+        val json = request("GET", "/api/speech/status", null, token) ?: return@withContext speechEnabled
+        speechEnabled = json.optBoolean("configured", false)
+        speechEnabled
+    }
+
+    /** Sends one utterance and returns what it said, or null when nothing usable came back. */
+    suspend fun transcribe(pcm: ByteArray): String? = withContext(Dispatchers.IO) {
+        if (!isConfigured() || pcm.isEmpty()) return@withContext null
+        val json = requestRaw("/api/device/transcribe", pcm, token)
+        val text = json?.optString("text").orEmpty().trim()
+        // A recogniser that heard nothing but room tone still answers, often with a lone "。".
+        // Treating that as an instruction started a task whose goal was a full stop.
+        if (text.count { it.isLetterOrDigit() } < 2) {
+            lastResult = "没听清，再说一次试试"
+            LoopLog.event("[voice] 识别为空")
+            return@withContext null
+        }
+        lastResult = "听懂了：$text"
+        LoopLog.event("[voice] 识别结果：$text")
+        text
+    }
+
+    /** A POST whose body is raw bytes (audio), not JSON. */
+    private fun requestRaw(path: String, body: ByteArray, token: String?): JSONObject? {
+        val url = try {
+            URL(baseUrl + path)
+        } catch (_: Exception) {
+            lastResult = "服务器地址无法识别"
+            return null
+        }
+        if (url.protocol != "https" && url.host !in setOf("127.0.0.1", "localhost", "::1")) {
+            lastResult = "服务器地址必须是 HTTPS"
+            return null
+        }
+        var connection: HttpURLConnection? = null
+        return try {
+            connection = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                connectTimeout = 8_000
+                // Transcribing a sentence takes the recogniser a moment; this is the one call that
+                // may legitimately be slow.
+                readTimeout = 20_000
+                doOutput = true
+                setRequestProperty("Content-Type", "application/octet-stream")
+                if (!token.isNullOrBlank()) setRequestProperty("Authorization", "Bearer $token")
+            }
+            connection.outputStream.use { it.write(body) }
+            val code = connection.responseCode
+            val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+            val text = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+            if (code !in 200..299) {
+                lastResult = if (code == 503) "服务端没有配置语音识别" else "语音识别返回 $code"
+                if (code == 503) speechEnabled = false
+                LoopLog.event("[voice] 上传失败 $code ${text.take(100)}")
+                return null
+            }
+            if (text.isBlank()) JSONObject() else JSONObject(text)
+        } catch (io: IOException) {
+            lastResult = "语音识别连不上（${io.javaClass.simpleName}）"
+            LoopLog.event("[voice] 上传异常：${io.message}")
+            null
+        } finally {
+            connection?.disconnect()
+        }
+    }
 
     /** Where the family types the pairing code; shown on the phone so it can be read aloud. */
     fun familyUrl(): String = if (baseUrl.isBlank()) "" else "$baseUrl/"

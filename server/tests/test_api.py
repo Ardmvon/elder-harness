@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import base64
+import json
 import re
 import time
+
+import pytest
 
 from app import db, notify, watch
 from conftest import auth
@@ -189,3 +193,72 @@ def test_summary_shape_is_stable(client, device):
     assert body["elder_name"] == "妈妈"
     assert [member["role"] for member in body["circle"]] == ["family"]
     assert re.match(r"^\d", device["pair_code"]) is None  # codes are letters/digits, no surprises
+
+
+# --------------------------------------------------------------------------- 语音识别（讯飞）
+
+def test_frame_shapes_for_both_protocol_styles():
+    from app import speech
+
+    classic = json.loads(speech.frame_for(speech.STYLE_CLASSIC, "appid", b"\x01\x02", 0, 3))
+    assert classic["common"]["app_id"] == "appid"
+    assert classic["data"]["status"] == 0 and classic["data"]["format"] == "audio/L16;rate=16000"
+    assert base64.b64decode(classic["data"]["audio"]) == b"\x01\x02"
+
+    new = json.loads(speech.frame_for(speech.STYLE_NEW, "appid", b"\x01\x02", 2, 9))
+    assert new["header"]["app_id"] == "appid" and new["header"]["status"] == 2
+    assert new["payload"]["audio"]["sample_rate"] == 16000
+    assert new["payload"]["audio"]["seq"] == 9
+
+
+def test_result_parsing_keeps_the_newest_text():
+    from app import speech
+
+    classic = {"code": 0, "data": {"status": 1, "result": {"ws": [{"cw": [{"w": "打开"}, {"w": "微信"}]}]}}}
+    assert speech.text_of(speech.STYLE_CLASSIC, classic) == "打开微信"
+    assert speech.finished(speech.STYLE_CLASSIC, {"data": {"status": 2}}) is True
+
+    payload = base64.b64encode(json.dumps({"ws": [{"cw": [{"w": "我到家了"}]}]}).encode()).decode()
+    new = {"header": {"code": 0, "status": 2}, "payload": {"result": {"text": payload}}}
+    assert speech.text_of(speech.STYLE_NEW, new) == "我到家了"
+    assert speech.finished(speech.STYLE_NEW, new) is True
+
+
+def test_recognition_errors_are_surfaced():
+    from app import speech
+
+    with pytest.raises(speech.SpeechError):
+        speech.text_of(speech.STYLE_CLASSIC, {"code": 10404, "message": "no category route found"})
+    with pytest.raises(speech.SpeechError):
+        speech.text_of(speech.STYLE_NEW, {"header": {"code": 10404, "message": "no route"}})
+
+
+def test_transcribe_endpoint_needs_a_device_and_returns_text(client, device, monkeypatch):
+    from app import speech
+
+    pcm = b"\x00\x01" * 8000  # half a second of PCM
+    assert client.post("/api/device/transcribe", content=pcm).status_code == 401
+
+    async def fake(pcm_bytes, keyterms=None):
+        assert len(pcm_bytes) == len(pcm)
+        return "打开微信"
+
+    monkeypatch.setattr(speech, "transcribe", fake)
+    response = client.post("/api/device/transcribe", content=pcm, headers=auth(device))
+    assert response.status_code == 200 and response.json()["text"] == "打开微信"
+
+
+def test_transcribe_failure_is_reported_as_unavailable(client, device, monkeypatch):
+    from app import speech
+
+    async def boom(pcm_bytes, keyterms=None):
+        raise speech.SpeechError("连不上语音识别服务")
+
+    monkeypatch.setattr(speech, "transcribe", boom)
+    response = client.post("/api/device/transcribe", content=b"\x00\x01" * 8000, headers=auth(device))
+    assert response.status_code == 503
+
+
+def test_speech_status_endpoint(client):
+    body = client.get("/api/speech/status").json()
+    assert set(body) == {"configured", "style"}

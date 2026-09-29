@@ -17,3 +17,4 @@ server/.venv/
 server/hotline.db*
 server/**/__pycache__/
 server/.pytest_cache/
+server/.env

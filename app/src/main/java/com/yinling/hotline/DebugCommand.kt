@@ -17,7 +17,7 @@ object DebugCommand {
     /** Keys declared as booleans; every other key is read as a string. */
     private val BOOLEAN_EXTRAS = setOf(
         EXTRA_ENABLE, EXTRA_VISION, EXTRA_AUTO_CONFIRM, EXTRA_START, EXTRA_CLEAR_LOG, EXTRA_RESTORE,
-        EXTRA_CENSUS, EXTRA_PAIR, EXTRA_CHECK_IN,
+        EXTRA_CENSUS, EXTRA_PAIR, EXTRA_CHECK_IN, EXTRA_VOICE_TEST,
     )
 
     /**
@@ -73,6 +73,13 @@ object DebugCommand {
     /** Sends one heartbeat on launch and logs whatever came back. */
     const val EXTRA_CHECK_IN = "check_in"
 
+    /**
+     * End-to-end voice self-test: speaks a sentence out loud, records it, sends it to the server's
+     * recogniser and logs both the audio size and the text. Lets the whole chain be verified without
+     * a person holding the phone.
+     */
+    const val EXTRA_VOICE_TEST = "selftest_voice"
+
     /** @return true when the extras asked for a task to be started. */
     fun apply(context: Context, app: HotlineApp, extras: Extras): Boolean {
         if (!BuildConfig.DEBUG) return false
@@ -101,6 +108,46 @@ object DebugCommand {
         session.visionEnabled = prefs.getBoolean("vision", false)
         LoopLog.enabled = session.developerMode
         if (extras.value(EXTRA_CLEAR_LOG) == true) LoopLog.clear()
+
+        if (extras.value(EXTRA_VOICE_TEST) == true) {
+            kotlinx.coroutines.CoroutineScope(
+                kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO,
+            ).launch {
+                // Everything in one runCatching: an exception in a bare `launch` reaches the default
+                // handler and kills the process, which is how this test looked like it simply stopped.
+                runCatching {
+                    val server = ServerClient(app)
+                    val ready = runCatching { server.refreshSpeechStatus() }.getOrDefault(false)
+                    LoopLog.event("[voice] 自测开始（服务端识别配置=$ready）")
+                    // Louder, so the microphone can hear the phone's own voice at all.
+                    runCatching {
+                        val audio = app.getSystemService(android.content.Context.AUDIO_SERVICE)
+                            as android.media.AudioManager
+                        audio.setStreamVolume(
+                            android.media.AudioManager.STREAM_MUSIC,
+                            audio.getStreamMaxVolume(android.media.AudioManager.STREAM_MUSIC),
+                            0,
+                        )
+                    }
+                    app.speaker.say("打开微信给女儿发一条消息说我到家了")
+                    kotlinx.coroutines.delay(1500)
+                    val started = app.recorder.start(android.media.MediaRecorder.AudioSource.MIC)
+                    LoopLog.event("[voice] 录音启动=$started")
+                    kotlinx.coroutines.delay(6000)
+                    val pcm = app.recorder.stop()
+                    // Keep the raw audio of the self-test only: it is the one way to tell "the
+                    // microphone heard nothing" apart from "the recogniser read nothing".
+                    runCatching {
+                        java.io.File(app.filesDir, "selftest.pcm").writeBytes(pcm)
+                    }
+                    LoopLog.event("[voice] 录到 ${pcm.size} 字节，开始上传")
+                    val heard = server.transcribe(pcm)
+                    LoopLog.event("[voice] 自测结束 识别=$heard")
+                }.onFailure { error ->
+                    LoopLog.event("[voice] 自测异常：${error.javaClass.simpleName} ${error.message}")
+                }
+            }
+        }
 
         // Runs after the log is configured, otherwise the pairing result is written into a log that
         // is not being kept yet — which is exactly how the first attempt looked like it did nothing.

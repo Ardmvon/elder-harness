@@ -11,6 +11,9 @@ class HotlineApp : Application() {
     /** Speaks the assistant's lines aloud; see [Speaker] for why this is not optional. */
     val speaker: Speaker by lazy { Speaker(this) }
 
+    /** Records one utterance for the server-side recogniser. */
+    val recorder: VoiceRecorder by lazy { VoiceRecorder() }
+
     override fun onCreate() {
         super.onCreate()
         LoopLog.attach(this)
