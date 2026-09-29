@@ -241,3 +241,29 @@ fun ElderVoiceCircle(
 fun ElderVerticalGap(height: androidx.compose.ui.unit.Dp = Elder.gap) {
     Spacer(Modifier.height(height).width(0.dp))
 }
+
+/**
+ * What the assistant's state is called, in one place.
+ *
+ * The home screen and the floating panel are drawn with different toolkits (Compose and plain
+ * Views), and they used to describe the same state with different words and different colours. The
+ * person sees both, sometimes at once; the wording belongs to the product, not to a toolkit.
+ */
+fun statusText(phase: TaskPhase): String = when (phase) {
+    TaskPhase.WORKING -> "正在办"
+    TaskPhase.CONFIRMING -> "等您点一下确认"
+    TaskPhase.ASKING -> "等您回答一句"
+    TaskPhase.NEEDS_PERSON -> "这一步要您自己做"
+    TaskPhase.NEEDS_FAMILY -> "已经找家人了"
+    TaskPhase.PAUSED -> "停下了"
+    TaskPhase.CANNOT -> "这件事我办不了"
+    TaskPhase.COMPLETED -> "办好了"
+    TaskPhase.IDLE -> "我在"
+}
+
+/** The colour that goes with [statusText]: green means fine, orange means it wants you, red means no. */
+fun statusTone(phase: TaskPhase): Color = when (phase) {
+    TaskPhase.CANNOT -> Elder.problem
+    TaskPhase.COMPLETED, TaskPhase.IDLE, TaskPhase.WORKING -> Elder.good
+    else -> Elder.attention
+}

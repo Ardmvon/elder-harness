@@ -69,8 +69,8 @@ class OverlayService : Service() {
     private var lastPhase: TaskPhase? = null
     private var lastExpanded: Boolean? = null
 
-    private val panelColor = Color.argb(0xEE, 0xFF, 0xFF, 0xFF)
-    private val pillColor = Color.rgb(8, 126, 117)
+    private val panelColor = OverlayUi.panel
+    private val pillColor = OverlayUi.brand
 
     /** Linear blend of two ARGB colours, used so the shell does not jump between states. */
     private fun blend(from: Int, to: Int, t: Float): Int = Color.argb(
@@ -251,36 +251,26 @@ class OverlayService : Service() {
         // Clip the new content to the shell: that is what makes the panel look like it grows out of
         // the bubble instead of being swapped in. Content is revealed, never scaled.
         root.clipToOutline = true
-        shell = GradientDrawable().apply {
-            // Start from the colour of the state we are leaving, otherwise a collapsing panel shows
-            // one full-size green frame before it starts shrinking (the "flash").
-            setColor(
-                when {
-                    collapsing -> panelColor
-                    expanding -> pillColor
-                    expanded -> panelColor
-                    else -> pillColor
-                },
-            )
-            cornerRadius = (if (expanded) dp(14) else dp(19)).toFloat()
-            setStroke(dp(1), Color.rgb(208, 218, 214))
-        }
+        shell = OverlayUi.shell(
+            color = when {
+                // Start from the colour of the state we are leaving, otherwise a collapsing panel
+                // shows one full-size green frame before it starts shrinking (the "flash").
+                collapsing -> panelColor
+                expanding -> pillColor
+                expanded -> panelColor
+                else -> pillColor
+            },
+            radiusPx = (if (expanded) dp(14) else dp(19)).toFloat(),
+            strokeColor = OverlayUi.line,
+            strokePx = dp(1),
+        )
         root.background = shell
 
         if (!expanded) {
-            val bubble = TextView(this).apply {
-                text = pillLabel(state)
-                textSize = 16f
-                setTextColor(Color.WHITE)
-                gravity = Gravity.CENTER
-                minWidth = dp(72)
-                minHeight = dp(38)
-                setOnClickListener {
-                    expanded = true
-                    openedWhileWorking = session.state.value.phase == TaskPhase.WORKING
-                    render(session.state.value)
-                }
-                contentDescription = "展开银龄专线接线台"
+            val bubble = OverlayUi.bubble(this, pillLabel(state), pillColor) {
+                expanded = true
+                openedWhileWorking = session.state.value.phase == TaskPhase.WORKING
+                render(session.state.value)
             }
             root.addView(bubble)
             this.bubble = bubble
@@ -309,24 +299,19 @@ class OverlayService : Service() {
         // step for them, or asked them to do it. A run that merely got stuck keeps the generic panel.
         val isPersonStep = state.needsPersonStep || state.phase == TaskPhase.NEEDS_PERSON
         if (!isResult && !isPersonStep) {
-            card.addView(TextView(this).apply {
-                text = "银龄专线  ·  ${state.phase.title()}"
-                textSize = 18f
-                setTextColor(Color.rgb(8, 94, 88))
-                setTypeface(null, android.graphics.Typeface.BOLD)
-            })
-            card.addView(TextView(this).apply {
-                text = state.goal.ifBlank { "当前没有进行中的事" }
-                textSize = 17f
-                setTextColor(Color.BLACK)
-                maxLines = 2
-            })
-            card.addView(TextView(this).apply {
-                text = state.message
-                textSize = 17f
-                setTextColor(Color.rgb(49, 58, 56))
-                maxLines = 4
-            })
+            // Same dot-and-word status line as the home screen, so the two surfaces agree.
+            card.addView(OverlayUi.statusRow(this, state.phase))
+            card.addView(OverlayUi.gap(this))
+            if (state.goal.isNotBlank()) {
+                card.addView(
+                    OverlayUi.text(this, state.goal, Elder.hint.value, OverlayUi.inkSoft, maxLines = 2),
+                )
+            }
+            if (state.message.isNotBlank()) {
+                card.addView(
+                    OverlayUi.text(this, state.message, Elder.body.value, OverlayUi.ink, maxLines = 6),
+                )
+            }
         }
 
         when {
@@ -405,7 +390,7 @@ class OverlayService : Service() {
         state.phase == TaskPhase.WORKING && state.step > 0 -> "正在办 ${state.step}"
         state.phase == TaskPhase.WORKING -> "正在办"
         state.phase == TaskPhase.IDLE -> "银龄"
-        else -> state.phase.title()
+        else -> statusText(state.phase)
     }
 
     /** Widest the panel is allowed to get. */
@@ -481,23 +466,11 @@ class OverlayService : Service() {
      * to hand control back, without having to work out what "接着办" refers to.
      */
     private fun personStepCard(card: LinearLayout, state: SessionState, animate: Boolean) {
-        val heading = TextView(this).apply {
-            text = "这一步要您自己做"
-            textSize = 20f
-            setTextColor(Color.rgb(196, 106, 20))
-            setTypeface(null, android.graphics.Typeface.BOLD)
-        }
+        // Same words and colours as the home screen's status line for this state.
+        val heading = OverlayUi.statusRow(this, TaskPhase.NEEDS_PERSON)
         card.addView(heading)
-        val body = TextView(this).apply {
-            text = state.message
-            textSize = 19f
-            setTextColor(Color.rgb(24, 32, 30))
-            setPadding(dp(14), dp(12), dp(14), dp(12))
-            background = GradientDrawable().apply {
-                setColor(Color.argb(0xE6, 253, 243, 231))
-                cornerRadius = dp(12).toFloat()
-            }
-        }
+        card.addView(OverlayUi.gap(this))
+        val body = OverlayUi.tinted(this, state.message, OverlayUi.waitTint)
         card.addView(body, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT,
             LinearLayout.LayoutParams.WRAP_CONTENT,
@@ -518,45 +491,33 @@ class OverlayService : Service() {
      */
     private fun resultCard(card: LinearLayout, state: SessionState, phaseChanged: Boolean) {
         val done = state.phase == TaskPhase.COMPLETED
-        val accent = if (done) Color.rgb(8, 126, 117) else Color.rgb(196, 106, 20)
-        val tint = if (done) Color.argb(0xE6, 232, 246, 243) else Color.argb(0xE6, 253, 243, 231)
+        val accent = if (done) OverlayUi.good else OverlayUi.attention
+        val tint = if (done) OverlayUi.doneTint else OverlayUi.waitTint
 
+        // Same dot-and-word heading the home screen shows for this state, with a mark on the left
+        // because a result is worth noticing at a glance.
         val heading = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        heading.addView(TextView(this).apply {
-            text = if (done) "✓" else "!"
-            textSize = 24f
-            setTextColor(accent)
-            setTypeface(null, android.graphics.Typeface.BOLD)
-        })
-        heading.addView(TextView(this).apply {
-            text = state.phase.title()
-            textSize = 20f
-            setTextColor(accent)
-            setTypeface(null, android.graphics.Typeface.BOLD)
-            setPadding(dp(8), 0, 0, 0)
-        })
+        heading.addView(OverlayUi.text(this, if (done) "✓" else "!", 24f, accent, bold = true))
+        heading.addView(
+            OverlayUi.text(this, statusText(state.phase), Elder.status.value, accent, bold = true)
+                .apply { setPadding(dp(8), 0, 0, 0) },
+        )
         card.addView(heading)
 
-        card.addView(TextView(this).apply {
-            text = state.goal.ifBlank { "刚才这件事" }
-            textSize = 15f
-            setTextColor(Color.rgb(120, 132, 129))
-            maxLines = 2
-        })
+        card.addView(
+            OverlayUi.text(
+                this,
+                state.goal.ifBlank { "刚才这件事" },
+                Elder.hint.value,
+                OverlayUi.inkSoft,
+                maxLines = 2,
+            ),
+        )
 
-        val conclusion = TextView(this).apply {
-            text = state.message
-            textSize = 19f
-            setTextColor(Color.rgb(24, 32, 30))
-            setPadding(dp(14), dp(12), dp(14), dp(12))
-            background = GradientDrawable().apply {
-                setColor(tint)
-                cornerRadius = dp(12).toFloat()
-            }
-        }
+        val conclusion = OverlayUi.tinted(this, state.message, tint)
         // Answers can be long (a timetable, a list of trains). Cut off mid-sentence is worse than a
         // scroll, so the block grows with its content up to a cap and then scrolls.
         val scroller = ScrollView(this).apply { addView(conclusion) }
@@ -575,12 +536,12 @@ class OverlayService : Service() {
                     // A half-visible line looks like a bug unless we say it can be scrolled.
                     scroller.isScrollbarFadingEnabled = false
                     card.addView(
-                        TextView(this@OverlayService).apply {
-                            text = "内容较长，可以上下滑动看全"
-                            textSize = 14f
-                            setTextColor(Color.rgb(130, 142, 139))
-                            setPadding(0, dp(4), 0, 0)
-                        },
+                        OverlayUi.text(
+                            this@OverlayService,
+                            "内容较长，可以上下滑动看全",
+                            14f,
+                            OverlayUi.inkSoft,
+                        ).apply { setPadding(0, dp(4), 0, 0) },
                         card.indexOfChild(scroller) + 1,
                     )
                     scroller.requestLayout()
@@ -633,29 +594,26 @@ class OverlayService : Service() {
             .start()
     }
 
-    private fun optionButton(text: String, onClick: () -> Unit) = Button(this).apply {
-        this.text = text
-        textSize = 17f
-        isAllCaps = false
-        setOnClickListener { onClick() }
-        layoutParams = LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT,
-            dp(54),
-        ).apply { topMargin = dp(6) }
-    }
+    private fun optionButton(text: String, onClick: () -> Unit) =
+        OverlayUi.option(this, text, onClick)
 
+    /** Two side-by-side secondary actions: the quiet choices, kept below the primary one. */
     private fun row(card: LinearLayout, first: Pair<String, () -> Unit>, second: Pair<String, () -> Unit>) {
         card.addView(LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            addView(action(first), LinearLayout.LayoutParams(dp(126), dp(52)))
-            addView(action(second), LinearLayout.LayoutParams(dp(126), dp(52)))
+            addView(smallAction(first), LinearLayout.LayoutParams(dp(130), dp(50)))
+            addView(smallAction(second), LinearLayout.LayoutParams(dp(130), dp(50)))
         })
     }
 
-    private fun action(item: Pair<String, () -> Unit>) = Button(this).apply {
+    private fun smallAction(item: Pair<String, () -> Unit>) = Button(this).apply {
         text = item.first
-        textSize = 16f
+        textSize = Elder.hint.value
         isAllCaps = false
+        setTextColor(OverlayUi.brandDeep)
+        background = OverlayUi.rounded(android.graphics.Color.WHITE, dp(12).toFloat()).apply {
+            setStroke(dp(1), OverlayUi.line)
+        }
         setOnClickListener { item.second() }
     }
 
@@ -698,14 +656,3 @@ private val AUTO_EXPAND = setOf(
 private fun TaskPhase.isResumable(): Boolean =
     this == TaskPhase.PAUSED || this == TaskPhase.CANNOT || this == TaskPhase.NEEDS_PERSON
 
-private fun TaskPhase.title(): String = when (this) {
-    TaskPhase.IDLE -> "待命"
-    TaskPhase.WORKING -> "正在办"
-    TaskPhase.CONFIRMING -> "等您确认"
-    TaskPhase.PAUSED -> "已暂停"
-    TaskPhase.NEEDS_FAMILY -> "找家人"
-    TaskPhase.COMPLETED -> "已完成"
-    TaskPhase.CANNOT -> "做不到"
-    TaskPhase.NEEDS_PERSON -> "等您操作"
-    TaskPhase.ASKING -> "等您回话"
-}

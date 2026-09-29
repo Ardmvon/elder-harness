@@ -268,23 +268,8 @@ private fun HomePage(
     val hasTask = state.goal.isNotBlank()
     val busy = hasTask && state.phase == TaskPhase.WORKING
     // One line, and only when it says something the person would want to know.
-    val statusText = when (state.phase) {
-        TaskPhase.WORKING -> "正在办，请稍等"
-        TaskPhase.CONFIRMING -> "等您点一下确认"
-        TaskPhase.ASKING -> "等您回答一句"
-        TaskPhase.NEEDS_PERSON -> "这一步要您自己做"
-        TaskPhase.NEEDS_FAMILY -> "已经找家人了"
-        TaskPhase.PAUSED -> "停下了"
-        TaskPhase.CANNOT -> "这件事我办不了"
-        TaskPhase.COMPLETED -> "办好了"
-        TaskPhase.IDLE -> "我在"
-    }
-    val tone = when (state.phase) {
-        TaskPhase.CANNOT -> Elder.problem
-        TaskPhase.COMPLETED, TaskPhase.IDLE -> Elder.good
-        TaskPhase.WORKING -> Elder.brand
-        else -> Elder.attention
-    }
+    val statusText = statusText(state.phase)
+    val tone = statusTone(state.phase)
     var typing by remember { mutableStateOf(false) }
 
     Box(modifier = Modifier.fillMaxSize()) {
