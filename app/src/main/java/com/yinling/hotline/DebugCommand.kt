@@ -1,6 +1,7 @@
 package com.yinling.hotline
 
 import android.content.Context
+import kotlinx.coroutines.launch
 
 /**
  * Debug-only entry point, so a task can be driven from a computer without typing the key on the
@@ -16,7 +17,7 @@ object DebugCommand {
     /** Keys declared as booleans; every other key is read as a string. */
     private val BOOLEAN_EXTRAS = setOf(
         EXTRA_ENABLE, EXTRA_VISION, EXTRA_AUTO_CONFIRM, EXTRA_START, EXTRA_CLEAR_LOG, EXTRA_RESTORE,
-        EXTRA_CENSUS,
+        EXTRA_CENSUS, EXTRA_PAIR, EXTRA_CHECK_IN,
     )
 
     /**
@@ -60,6 +61,18 @@ object DebugCommand {
     /** Restores the most recent saved task instead of starting a new one. */
     const val EXTRA_RESTORE = "restore"
 
+    /** Trusted-circle server address, for wiring up a local server during development. */
+    const val EXTRA_SERVER = "server"
+
+    /** Elder's name as the circle will see it. */
+    const val EXTRA_ELDER = "elder"
+
+    /** Pairs with the server on launch, so a device can be set up without typing a URL. */
+    const val EXTRA_PAIR = "pair"
+
+    /** Sends one heartbeat on launch and logs whatever came back. */
+    const val EXTRA_CHECK_IN = "check_in"
+
     /** @return true when the extras asked for a task to be started. */
     fun apply(context: Context, app: HotlineApp, extras: Extras): Boolean {
         if (!BuildConfig.DEBUG) return false
@@ -70,6 +83,8 @@ object DebugCommand {
         val edit = prefs.edit()
 
         (extras.value(EXTRA_ENDPOINT) as? String)?.takeIf { it.isNotBlank() }?.let { edit.putString("endpoint", it.trim()) }
+        (extras.value(EXTRA_SERVER) as? String)?.takeIf { it.isNotBlank() }?.let { edit.putString("server_url", it.trim().trimEnd('/')) }
+        (extras.value(EXTRA_ELDER) as? String)?.takeIf { it.isNotBlank() }?.let { edit.putString("elder_name", it.trim()) }
         (extras.value(EXTRA_MODEL) as? String)?.takeIf { it.isNotBlank() }?.let { edit.putString("model", it.trim()) }
         // Only touch a switch when the caller actually passed it, otherwise a debug launch would
         // silently reset the person's own settings.
@@ -86,6 +101,24 @@ object DebugCommand {
         session.visionEnabled = prefs.getBoolean("vision", false)
         LoopLog.enabled = session.developerMode
         if (extras.value(EXTRA_CLEAR_LOG) == true) LoopLog.clear()
+
+        // Runs after the log is configured, otherwise the pairing result is written into a log that
+        // is not being kept yet — which is exactly how the first attempt looked like it did nothing.
+        if (extras.value(EXTRA_PAIR) == true || extras.value(EXTRA_CHECK_IN) == true) {
+            kotlinx.coroutines.CoroutineScope(
+                kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO,
+            ).launch {
+                val server = ServerClient(app)
+                if (extras.value(EXTRA_PAIR) == true) {
+                    runCatching { server.pair() }
+                        .onFailure { LoopLog.event("[server] 配对失败：${it.message}") }
+                }
+                if (extras.value(EXTRA_CHECK_IN) == true) {
+                    val pending = runCatching { server.heartbeat("debug") }.getOrDefault(emptyList())
+                    LoopLog.event("[server] 调试心跳返回 ${pending.size} 条：$pending")
+                }
+            }
+        }
 
         // Never log the key itself, not even a prefix: this file stays on the device.
         LoopLog.event(

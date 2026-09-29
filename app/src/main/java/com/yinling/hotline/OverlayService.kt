@@ -134,8 +134,15 @@ class OverlayService : Service() {
      */
     private suspend fun watchAccessibility() {
         var misses = 0
+        val server = ServerClient(applicationContext as HotlineApp)
+        // The daily peace message never actually ran before: nothing called PeaceCheck.tick(). It is
+        // wired here because this loop is the only thing that is reliably alive while the app runs.
+        val peace = PeaceCheck(this)
         while (true) {
             delay(ACCESSIBILITY_CHECK_MS)
+            checkInWithTheCircle(server)
+            runCatching { peace.tick() }
+                .onFailure { LoopLog.event("[peace] 定时检查失败：${it.message}") }
             if (ScreenAccessService.isRunning()) {
                 misses = 0
                 Notices.clearAccessibility(this)
@@ -152,6 +159,26 @@ class OverlayService : Service() {
                 misses = 0
             }
         }
+    }
+
+    /**
+     * Proof of life for the server, and the phone's inbox.
+     *
+     * The heartbeat is what lets the circle notice a phone that has gone quiet — the one thing the
+     * phone cannot report about itself. Anything the circle sent back is logged for now; M2 turns it
+     * into the full-screen card and speaks it aloud.
+     */
+    private suspend fun checkInWithTheCircle(server: ServerClient) {
+        if (!server.isConfigured()) return
+        val due = System.currentTimeMillis() - server.lastHeartbeatAt >= server.heartbeatSeconds * 1000L
+        if (!due) return
+        runCatching {
+            val watching = ScreenAccessService.isRunning()
+            val pending = server.heartbeat(note = if (watching) "看护中" else "无障碍未运行")
+            pending.forEach { message ->
+                LoopLog.event("[server] 收到 ${message.kind}：${message.title} ${message.body}")
+            }
+        }.onFailure { LoopLog.event("[server] 心跳失败：${it.message}") }
     }
 
     private fun render(state: SessionState) {
@@ -566,7 +593,7 @@ class OverlayService : Service() {
     }
 
     private fun familyRow(card: LinearLayout, state: SessionState) {
-        if (session.familyPhone.isBlank()) openHome()
+        if (!session.hasHelpChannel()) openHome()
         else session.requestHelp(state.goal, state.message)
     }
 

@@ -24,56 +24,62 @@ import javax.crypto.spec.GCMParameterSpec
 object SecretStore {
 
     private const val PREFS = "hotline"
-    private const val KEY_CIPHERTEXT = "api_key_enc"
-    private const val KEY_IV = "api_key_iv"
     private const val KEYSTORE = "AndroidKeyStore"
-    private const val ALIAS = "hotline_api_key"
+
+    /** The model key, as before this file could hold more than one secret. */
+    const val API_KEY = "api_key"
+
+    /** The pairing token this phone uses to talk to the trusted-circle server. */
+    const val DEVICE_TOKEN = "device_token"
     private const val TRANSFORM = "AES/GCM/NoPadding"
     private const val TAG_BITS = 128
 
-    fun save(context: Context, plain: String) {
+    fun save(context: Context, plain: String, name: String = API_KEY) {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val ciphertextKey = "${name}_enc"
+        val ivKey = "${name}_iv"
         if (plain.isBlank()) {
-            prefs.edit().remove(KEY_CIPHERTEXT).remove(KEY_IV).apply()
+            prefs.edit().remove(ciphertextKey).remove(ivKey).apply()
             return
         }
         runCatching {
             val cipher = Cipher.getInstance(TRANSFORM)
-            cipher.init(Cipher.ENCRYPT_MODE, secretKey())
+            cipher.init(Cipher.ENCRYPT_MODE, secretKey(name))
             val bytes = cipher.doFinal(plain.toByteArray())
             prefs.edit()
-                .putString(KEY_CIPHERTEXT, Base64.encodeToString(bytes, Base64.NO_WRAP))
-                .putString(KEY_IV, Base64.encodeToString(cipher.iv, Base64.NO_WRAP))
+                .putString(ciphertextKey, Base64.encodeToString(bytes, Base64.NO_WRAP))
+                .putString(ivKey, Base64.encodeToString(cipher.iv, Base64.NO_WRAP))
                 .apply()
         }.onFailure { LoopLog.event("[key] 保存失败，本次不落盘：${it.message}") }
     }
 
-    fun load(context: Context): String {
+    fun load(context: Context, name: String = API_KEY): String {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        val data = prefs.getString(KEY_CIPHERTEXT, null) ?: return ""
-        val iv = prefs.getString(KEY_IV, null) ?: return ""
+        val data = prefs.getString("${name}_enc", null) ?: return ""
+        val iv = prefs.getString("${name}_iv", null) ?: return ""
         return runCatching {
             val cipher = Cipher.getInstance(TRANSFORM)
             cipher.init(
                 Cipher.DECRYPT_MODE,
-                secretKey(),
+                secretKey(name),
                 GCMParameterSpec(TAG_BITS, Base64.decode(iv, Base64.NO_WRAP)),
             )
             String(cipher.doFinal(Base64.decode(data, Base64.NO_WRAP)))
         }.getOrElse {
-            prefs.edit().remove(KEY_CIPHERTEXT).remove(KEY_IV).apply()
+            prefs.edit().remove("${name}_enc").remove("${name}_iv").apply()
             LoopLog.event("[key] 解密失败，已清除（需要重新填写）：${it.message}")
             ""
         }
     }
 
-    private fun secretKey(): SecretKey {
+    private fun secretKey(name: String): SecretKey {
+        val alias = "hotline_$name"
         val store = KeyStore.getInstance(KEYSTORE).apply { load(null) }
-        (store.getEntry(ALIAS, null) as? KeyStore.SecretKeyEntry)?.let { return it.secretKey }
+        (store.getEntry(alias, null) as? KeyStore.SecretKeyEntry)?.let { return it.secretKey }
         return KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, KEYSTORE).apply {
             init(
                 KeyGenParameterSpec.Builder(
-                    ALIAS,
+                    alias,
                     KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
                 )
                     .setBlockModes(KeyProperties.BLOCK_MODE_GCM)

@@ -48,6 +48,9 @@ interface FamilyGateway {
 class SessionController(private val app: HotlineApp) : FamilyGateway {
 
     private val prefs = app.getSharedPreferences("hotline", 0)
+
+    /** The trusted-circle server, if the family has paired this phone with one. */
+    val server = ServerClient(app)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private val mutableState = MutableStateFlow(initialState())
     val state = mutableState.asStateFlow()
@@ -503,12 +506,46 @@ class SessionController(private val app: HotlineApp) : FamilyGateway {
 
     // ---- family ------------------------------------------------------------
 
+    /**
+     * Whether there is any way to reach the circle at all: a paired server, or the fallback of a
+     * phone number the person can text. Asking for a number that is no longer needed was how
+     * "请家人帮忙" ended up opening Settings instead of asking for help.
+     */
+    fun hasHelpChannel(): Boolean = server.isConfigured() || familyPhone.isNotBlank()
+
     override fun requestHelp(goal: String, reason: String) {
         stop()
+        val context = "目标：$goal\n卡在：${reason.ifBlank { "说不清楚，需要人看一下" }}"
+        if (server.isConfigured()) {
+            // The circle gets a structured request they can see on a web page and take over, instead
+            // of a text-message draft the person still has to send themselves.
+            mutableState.value = state.value.copy(
+                message = "已经告诉家人了，他们会尽快联系您。",
+                phase = TaskPhase.NEEDS_FAMILY,
+            )
+            scope.launch {
+                val ok = server.postEvent(
+                    kind = "help",
+                    title = "${server.elderName.ifBlank { "老人" }}需要人帮忙",
+                    body = reason.ifBlank { "需要人帮忙看一下" },
+                    context = context,
+                )
+                if (!ok) {
+                    // Server unreachable: fall back to the channel that needs nothing from anyone.
+                    smsHelp(goal, reason)
+                }
+            }
+            return
+        }
         mutableState.value = state.value.copy(
             message = "请在短信应用发送求助，家人收到后可回电。",
             phase = TaskPhase.NEEDS_FAMILY,
         )
+        smsHelp(goal, reason)
+    }
+
+    /** The zero-infrastructure fallback: a text-message draft the person sends themselves. */
+    private fun smsHelp(goal: String, reason: String) {
         val phone = familyPhone
         if (phone.isBlank()) return
         val body = "银龄专线求助：我想办“$goal”。目前卡在：$reason。请给我回电话。"

@@ -23,6 +23,8 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -118,7 +120,7 @@ class MainActivity : ComponentActivity() {
                                 moveTaskToBack(true)
                             },
                             onFamily = {
-                                if (session.familyPhone.isBlank()) settings = true
+                                if (!session.hasHelpChannel()) settings = true
                                 else session.requestHelp(state.goal.ifBlank { "使用手机" }, state.message)
                             },
                             onCall = {
@@ -355,6 +357,8 @@ private fun SettingsPage(session: SessionController, onBack: () -> Unit) {
         KeepAliveSection()
         Spacer(Modifier.height(8.dp))
         PeaceSection()
+        Spacer(Modifier.height(8.dp))
+        ServerSection()
         Button(onClick = {
             session.familyName = familyName.trim()
             session.familyPhone = familyPhone.trim()
@@ -516,5 +520,94 @@ private fun PeaceSection() {
             },
             modifier = Modifier.fillMaxWidth(),
         ) { Text("现在检查一次（不会发送）") }
+    }
+}
+
+/**
+ * Pairing this phone with the trusted circle.
+ *
+ * The family sets this up once. After that the phone reports what happened, and the people who care
+ * open a web link — no app for them to install, and no extra permission for the elder to grant.
+ */
+@Composable
+private fun ServerSection() {
+    val context = LocalContext.current
+    val app = context.applicationContext as HotlineApp
+    val server = remember { ServerClient(app) }
+    val scope = rememberCoroutineScope()
+    var tick by remember { mutableIntStateOf(0) }
+    var address by remember { mutableStateOf(server.baseUrl) }
+    var elder by remember { mutableStateOf(server.elderName) }
+    var busy by remember { mutableStateOf(false) }
+
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("家人与社区（可信的人）", fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+        Text(
+            "配对后，遇到办不了的事会通知家人和社区。他们不用装应用：打开网页就能看到，并接手处理。" +
+                "只有名单里的人算数。",
+            fontSize = 15.sp,
+        )
+        OutlinedTextField(
+            elder, { elder = it; server.elderName = it },
+            label = { Text("老人称呼（家人看到的，如：妈妈）") },
+            modifier = Modifier.fillMaxWidth(),
+        )
+        OutlinedTextField(
+            address, { address = it },
+            label = { Text("服务器地址（如 http://192.168.1.5:8787）") },
+            modifier = Modifier.fillMaxWidth(),
+        )
+        OutlinedButton(
+            onClick = {
+                server.baseUrl = address
+                server.elderName = elder
+                busy = true
+                scope.launch {
+                    runCatching { server.pair() }
+                    busy = false
+                    tick++
+                }
+            },
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text(if (busy) "正在配对…" else "配对 / 重新配对") }
+
+        if (server.pairCode.isNotBlank()) {
+            Text("配对码", fontSize = 16.sp)
+            Text(server.pairCode, fontSize = 34.sp, fontWeight = FontWeight.Bold)
+            Text(
+                "让家人在手机浏览器打开 ${server.familyUrl()}，输入这个配对码，选自己的身份（家人/社区/邻居）。",
+                fontSize = 15.sp,
+            )
+        }
+        Text(remember(tick) { server.lastResult.ifBlank { "还没联系过服务器" } }, fontSize = 15.sp)
+        OutlinedButton(
+            onClick = {
+                busy = true
+                scope.launch {
+                    runCatching { server.heartbeat("手动联系") }
+                    busy = false
+                    tick++
+                }
+            },
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text("现在联系一次") }
+        OutlinedButton(
+            onClick = {
+                busy = true
+                scope.launch {
+                    runCatching {
+                        server.postEvent(
+                            kind = "help",
+                            title = "${server.elderName.ifBlank { "老人" }}需要人帮忙（测试）",
+                            body = "这是一条测试求助，用来确认家人那边收得到。",
+                            context = "目标：测试家人端\\n卡在：测试按钮",
+                        )
+                    }
+                    busy = false
+                    tick++
+                }
+            },
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text("发一条测试求助") }
     }
 }

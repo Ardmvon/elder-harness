@@ -11,3 +11,9 @@ local.properties
 
 # harness 构建产物
 harness/out/
+
+# 服务端本地开发
+server/.venv/
+server/hotline.db*
+server/**/__pycache__/
+server/.pytest_cache/

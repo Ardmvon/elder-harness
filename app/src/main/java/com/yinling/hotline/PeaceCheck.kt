@@ -2,6 +2,7 @@ package com.yinling.hotline
 
 import android.Manifest
 import android.content.Context
+import kotlinx.coroutines.launch
 import android.content.pm.PackageManager
 import android.os.Build
 import android.telephony.SmsManager
@@ -24,6 +25,11 @@ import java.time.ZoneId
  * lot — including being kept there by a caller — looks perfectly normal.
  */
 class PeaceCheck(private val context: Context) {
+
+    private val server = ServerClient(context.applicationContext as HotlineApp)
+    private val scope = kotlinx.coroutines.CoroutineScope(
+        kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO,
+    )
 
     private val prefs = context.getSharedPreferences("hotline", Context.MODE_PRIVATE)
     private val session get() = (context.applicationContext as HotlineApp).session
@@ -100,6 +106,13 @@ class PeaceCheck(private val context: Context) {
             is PeaceDecision.DailyOk -> decision.message
             is PeaceDecision.Alert -> decision.message
             else -> null
+        }
+        // Tell the circle as well, when the phone has been paired with a server. The SMS path stays
+        // as it is: for many families a text message is the only channel that is actually read.
+        if (announce && message != null && server.isConfigured()) {
+            val kind = if (decision is PeaceDecision.DailyOk) "peace" else "alert"
+            val title = if (kind == "peace") "报平安" else "今天一直没有动静"
+            scope.launch { server.postEvent(kind, title, message) }
         }
         if (message != null && !announce) {
             LoopLog.event("[peace] 预览（不发送）：${decision::class.simpleName}")

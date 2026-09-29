@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  HTTPS everywhere, with one exception: a server running on this machine, used while developing.
+  The exception is deliberately narrow (loopback only) and matches the rule in ServerClient, so a
+  real deployment cannot quietly fall back to plain HTTP.
+-->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">127.0.0.1</domain>
+        <domain includeSubdomains="false">localhost</domain>
+    </domain-config>
+</network-security-config>
