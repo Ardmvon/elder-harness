@@ -35,7 +35,7 @@
 | 操作约束 | 文字控件敏感词拦截、本人操作交接、坐标点按首次确认 | 坐标点按、粘贴等执行路径尚未统一经过内容风控；不能声称全路径可靠阻断 |
 | 结果检查 | 对完成声明中的输入文字、时间、改变类动作做一致性检查 | 只能排除部分不可能声明，不能证明真实任务已成功；页面前后证据核验尚未实现 |
 | 暂停续办 | 进程内暂停、追问、本人操作后可继续；有会话存档 | 首页历史恢复入口不完整，不宜宣传普通用户已能完整跨重启续办 |
-| 亲友协作 | 配对、网页查看、求助认领、角色过滤、家人留言接口、手机心跳 | 老人侧收到亲友消息后仍主要写日志，大字卡片/播报回执未闭环；没有远程代操作 |
+| 亲友协作 | 配对、网页查看、求助认领、角色过滤、家人留言接口、手机心跳、大字卡片与语音播报 | 老人侧已能显示并朗读亲友消息和认领回执；家人端暂不显示手机是否已读；没有远程代操作 |
 | 平安提示 | 有每日规则、心跳和服务端失联检测 | 活动采集调用链缺失；短信通知为日志占位；不构成健康诊断或 24 小时可靠看护 |
 | 经验技巧 | 六类静态按需技巧，如盲页、微信输入、表格读取 | 自动从示范学习、长期技能记忆、安全迁移和技能自进化属于拟研发 |
 | 测试基础 | 仓库有 73 个 JVM 检查和服务端测试；另有真机手工记录 | 检查数量不是老人任务成功率；暂无大样本老年用户或跨机型验证 |
@@ -47,7 +47,7 @@
 - [ScreenAccessService.kt](/home/lhx/Projects/elder-harness/app/src/main/java/com/yinling/hotline/ScreenAccessService.kt:357)：坐标点按发生在敏感页判断之前，是统一风控需要覆盖的路径。
 - [VoiceSession.kt](/home/lhx/Projects/elder-harness/app/src/main/java/com/yinling/hotline/VoiceSession.kt:86)：持续语音和播报打断。
 - [SessionController.kt](/home/lhx/Projects/elder-harness/app/src/main/java/com/yinling/hotline/SessionController.kt:572)：将目标和卡点衔接到亲友求助。
-- [OverlayService.kt](/home/lhx/Projects/elder-harness/app/src/main/java/com/yinling/hotline/OverlayService.kt:190)：亲友消息下行仍处于日志阶段。
+- [SessionController.kt](/home/lhx/Projects/elder-harness/app/src/main/java/com/yinling/hotline/SessionController.kt)：亲友消息下行进入大字卡片和语音播报；[OverlayService.kt](/home/lhx/Projects/elder-harness/app/src/main/java/com/yinling/hotline/OverlayService.kt) 负责浮层展示与收起。
 - [PeaceCheck.kt](/home/lhx/Projects/elder-harness/app/src/main/java/com/yinling/hotline/PeaceCheck.kt:60)：活动记录函数存在，但生产调用未接上。
 - [server/app/main.py](/home/lhx/Projects/elder-harness/server/app/main.py:133)：求助事件、网页协作及相关接口；[notify.py](/home/lhx/Projects/elder-harness/server/app/notify.py:1) 明确通知当前仅为日志。
 

@@ -32,6 +32,8 @@ data class SessionState(
     val hasPendingApproval: Boolean = false,
     /** The agent stopped because this step has to be done by the person themselves. */
     val needsPersonStep: Boolean = false,
+    /** A message from the trusted circle, shown as a big card and read aloud. */
+    val circleMessage: PendingMessage? = null,
 )
 
 interface FamilyGateway {
@@ -127,6 +129,13 @@ class SessionController(private val app: HotlineApp) : FamilyGateway {
     private val cache = RecipeCache(prefs)
     private val phoneTools = AndroidPhoneTools(app)
     private val sessions = SessionStore(app)
+
+    /**
+     * Downlink news from the trusted circle. These are not part of the task transcript: they are
+     * for the person, not for the model, and must never be mistaken for an instruction to act.
+     */
+    private val circleQueue = ArrayDeque<PendingMessage>()
+    private val shownCircleMessageIds = mutableSetOf<Int>()
 
     /** Id of the task currently loaded, so its transcript can be saved and resumed. */
     private var sessionId: String = newSessionId()
@@ -568,6 +577,51 @@ class SessionController(private val app: HotlineApp) : FamilyGateway {
      * "请家人帮忙" ended up opening Settings instead of asking for help.
      */
     fun hasHelpChannel(): Boolean = server.isConfigured() || familyPhone.isNotBlank()
+
+    /**
+     * Turns to-device events from the heartbeat into the person-facing card and speech.
+     *
+     * Kept out of the task transcript on purpose: a family message is news for the person, not a
+     * command for the planner. The card takes priority over the task panel until it is dismissed.
+     */
+    fun receiveCircleMessages(messages: List<PendingMessage>) {
+        if (messages.isEmpty()) return
+        var added = false
+        messages.forEach { message ->
+            if (shownCircleMessageIds.add(message.id)) {
+                circleQueue.addLast(message)
+                added = true
+            }
+        }
+        if (!added) return
+        LoopLog.event("[circle] 收到 ${messages.size} 条，待显示 ${circleQueue.size} 条")
+        if (state.value.circleMessage == null) showNextCircleMessage()
+    }
+
+    /** The person has seen the message; show the next one, if any. */
+    fun dismissCircleMessage() {
+        if (state.value.circleMessage == null) return
+        mutableState.value = state.value.copy(circleMessage = null)
+        showNextCircleMessage()
+    }
+
+    private fun showNextCircleMessage() {
+        if (circleQueue.isEmpty()) return
+        val message = circleQueue.removeFirst()
+        mutableState.value = state.value.copy(circleMessage = message)
+        LoopLog.event("[circle] 显示 id=${message.id} kind=${message.kind}")
+        app.speaker.say(circleSpeech(message))
+    }
+
+    private fun circleSpeech(message: PendingMessage): String {
+        val sender = message.from.ifBlank { "家人" }
+        return when (message.kind) {
+            "message" -> "$sender 留言：${message.body}"
+            else -> listOf(message.title, message.body)
+                .filter { it.isNotBlank() }
+                .joinToString("。")
+        }
+    }
 
     override fun requestHelp(goal: String, reason: String) {
         stop()

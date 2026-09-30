@@ -252,6 +252,7 @@ class MainActivity : ComponentActivity() {
                                 session.restore(id)
                                 moveTaskToBack(true)
                             },
+                            onDismissCircleMessage = session::dismissCircleMessage,
                         )
                     }
                 }
@@ -314,15 +315,18 @@ private fun HomePage(
     onSettings: () -> Unit,
     onFinish: () -> Unit,
     onRestore: (String) -> Unit,
+    onDismissCircleMessage: () -> Unit,
     answer: String,
     onAnswerChange: (String) -> Unit,
     onAnswer: (String) -> Unit,
 ) {
     val hasTask = state.goal.isNotBlank()
     val busy = hasTask && state.phase == TaskPhase.WORKING
-    // One line, and only when it says something the person would want to know.
-    val statusText = statusText(state.phase)
-    val tone = statusTone(state.phase)
+    val circleMessage = state.circleMessage
+    // One line, and only when it says something the person would want to know. A message from the
+    // family outranks the task, because it is short and was sent by a person waiting for a reply.
+    val statusLine = if (circleMessage != null) "家人有话说" else statusText(state.phase)
+    val tone = if (circleMessage != null) Elder.brand else statusTone(state.phase)
     var typing by remember { mutableStateOf(false) }
 
     Box(modifier = Modifier.fillMaxSize()) {
@@ -339,7 +343,7 @@ private fun HomePage(
 
             Spacer(Modifier.weight(1f))
 
-            ElderStatusLine(statusText, tone, modifier = Modifier.fillMaxWidth())
+            ElderStatusLine(statusLine, tone, modifier = Modifier.fillMaxWidth())
 
             Spacer(Modifier.height(Elder.gap))
 
@@ -351,6 +355,7 @@ private fun HomePage(
                 state.phase == TaskPhase.NEEDS_FAMILY ||
                 state.phase == TaskPhase.CANNOT
             val circleCaption = when {
+                circleMessage != null -> "知道了"
                 listening -> "正在听…"
                 transcribing -> "正在听懂…"
                 busy -> "停下来"
@@ -360,6 +365,7 @@ private fun HomePage(
                 else -> "打字或说话"
             }
             val circleHint = when {
+                circleMessage != null -> "点一下表示您看到了"
                 listening -> "说完就停，或再点一下"
                 transcribing -> "稍等一下"
                 busy -> "正在办事，点一下就停"
@@ -377,6 +383,7 @@ private fun HomePage(
                 listening = listening || transcribing,
                 busy = busy,
                 icon = when {
+                    circleMessage != null -> Icons.Default.Check
                     busy -> Icons.Default.Close
                     listening || transcribing -> Icons.Default.Mic
                     state.phase == TaskPhase.COMPLETED -> Icons.Default.Check
@@ -386,6 +393,7 @@ private fun HomePage(
                 },
                 onClick = {
                     when {
+                        circleMessage != null -> onDismissCircleMessage()
                         listening -> onListen()
                         transcribing -> Unit
                         busy -> onFinish()
@@ -400,9 +408,30 @@ private fun HomePage(
 
             Spacer(Modifier.height(Elder.gap))
 
-            // Cards appear only when the person actually has a decision to make.
-            when (state.phase) {
-                TaskPhase.ASKING -> ElderCard {
+            // Cards appear only when the person actually has a decision to make. A family message
+            // replaces the task card until it is acknowledged, but does not disturb the task itself.
+            when {
+                circleMessage != null -> ElderCard {
+                    Text(
+                        if (circleMessage.kind == "message") "家人留言" else "家人的回应",
+                        fontSize = Elder.heading,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(
+                        if (circleMessage.from.isBlank()) "家人" else "来自 ${circleMessage.from}",
+                        fontSize = Elder.hint,
+                        color = Elder.inkSoft,
+                    )
+                    if (circleMessage.kind != "message" && circleMessage.title.isNotBlank()) {
+                        Text(circleMessage.title, fontSize = Elder.body, fontWeight = FontWeight.SemiBold)
+                    }
+                    if (circleMessage.body.isNotBlank()) {
+                        Text(circleMessage.body, fontSize = Elder.body)
+                    }
+                    ElderPrimaryButton("知道了", onDismissCircleMessage)
+                }
+
+                state.phase == TaskPhase.ASKING -> ElderCard {
                     Text(state.goal, fontSize = Elder.hint, color = Elder.inkSoft)
                     Text(state.message, fontSize = Elder.body)
                     OutlinedTextField(
@@ -415,13 +444,16 @@ private fun HomePage(
                     ElderPrimaryButton("回答", { onAnswer(answer) }, enabled = answer.isNotBlank())
                 }
 
-                TaskPhase.NEEDS_PERSON, TaskPhase.PAUSED, TaskPhase.NEEDS_FAMILY, TaskPhase.CANNOT -> ElderCard {
+                state.phase == TaskPhase.NEEDS_PERSON ||
+                    state.phase == TaskPhase.PAUSED ||
+                    state.phase == TaskPhase.NEEDS_FAMILY ||
+                    state.phase == TaskPhase.CANNOT -> ElderCard {
                     Text(state.message, fontSize = Elder.body)
                     ElderPrimaryButton("我做好了，继续", onResumeTask)
                     ElderSecondaryButton("停下来", onFinish)
                 }
 
-                TaskPhase.COMPLETED -> ElderCard {
+                state.phase == TaskPhase.COMPLETED -> ElderCard {
                     Text(state.message, fontSize = Elder.body)
                     ElderPrimaryButton("知道了", onFinish)
                 }
@@ -429,7 +461,7 @@ private fun HomePage(
                 else -> Unit
             }
 
-            if (!hasTask && request.isNotBlank()) {
+            if (circleMessage == null && !hasTask && request.isNotBlank()) {
                 ElderCard {
                     Text("您说的是：", fontSize = Elder.hint, color = Elder.inkSoft)
                     Text(request, fontSize = Elder.body)
@@ -437,7 +469,7 @@ private fun HomePage(
                 }
             }
 
-            if (typing) {
+            if (circleMessage == null && typing) {
                 ElderCard {
                     val focus = remember { FocusRequester() }
                     LaunchedEffect(Unit) { runCatching { focus.requestFocus() } }
@@ -474,7 +506,7 @@ private fun HomePage(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceEvenly,
             ) {
-                if (!typing && !hasTask) {
+                if (circleMessage == null && !typing && !hasTask) {
                     TextButton(onClick = { typing = true }) {
                         Text("打字", fontSize = Elder.hint, color = Elder.inkSoft)
                     }

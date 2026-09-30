@@ -69,6 +69,7 @@ class OverlayService : Service() {
     private var lastShape: String? = null
     private var lastPhase: TaskPhase? = null
     private var lastExpanded: Boolean? = null
+    private var lastCircleMessageId: Int? = null
 
     private val panelColor = OverlayUi.panel
     private val pillColor = OverlayUi.brand
@@ -191,8 +192,8 @@ class OverlayService : Service() {
      * Proof of life for the server, and the phone's inbox.
      *
      * The heartbeat is what lets the circle notice a phone that has gone quiet — the one thing the
-     * phone cannot report about itself. Anything the circle sent back is logged for now; M2 turns it
-     * into the full-screen card and speaks it aloud.
+     * phone cannot report about itself. Anything the circle sends back is turned into a big card and
+     * spoken aloud, so a family message reaches someone who cannot comfortably read the screen.
      */
     private suspend fun checkInWithTheCircle(server: ServerClient) {
         if (!server.isConfigured()) return
@@ -204,6 +205,7 @@ class OverlayService : Service() {
             pending.forEach { message ->
                 LoopLog.event("[server] 收到 ${message.kind}：${message.title} ${message.body}")
             }
+            if (pending.isNotEmpty()) session.receiveCircleMessages(pending)
         }.onFailure { LoopLog.event("[server] 心跳失败：${it.message}") }
     }
 
@@ -215,11 +217,17 @@ class OverlayService : Service() {
             return
         }
         val phaseChanged = state.phase != lastPhase
+        val circleMessage = state.circleMessage
+        val circleChanged = circleMessage?.id != lastCircleMessageId
 
         // Anything that waits for the person opens the panel by itself — but only when the
         // situation changes. Forcing it open on every update meant "知道了" could never close a
         // finished task: the panel re-opened itself immediately.
-        if (state.phase in AUTO_EXPAND) {
+        if (circleMessage != null) {
+            // A message from a real person outranks the task. It is short, and dismissing it puts
+            // the task panel back exactly where it was.
+            if (circleChanged) expanded = true
+        } else if (state.phase in AUTO_EXPAND) {
             if (phaseChanged) expanded = true
         } else if (state.phase == TaskPhase.WORKING) {
             // While it works, stay collapsed unless the person deliberately opened it. An open panel
@@ -234,7 +242,7 @@ class OverlayService : Service() {
         // The conversation state belongs in here: without it the panel kept the old microphone label
         // and gave no sign that it had started listening, so the button looked dead.
         val shape = "${state.phase}|$expanded|${state.goal}|${state.message}|${state.options}|" +
-            "${session.voice.state.value}"
+            "${circleMessage?.id}|${session.voice.state.value}"
         if (shape == lastShape) {
             // Same shape, but the run may have moved on a step: that is what the bubble shows.
             bubble?.text = pillLabel(state)
@@ -254,6 +262,7 @@ class OverlayService : Service() {
         lastShape = shape
         lastPhase = state.phase
         lastExpanded = expanded
+        lastCircleMessageId = circleMessage?.id
 
         pulse?.cancel()
         pulse = null
@@ -304,6 +313,19 @@ class OverlayService : Service() {
         root.setPadding(dp(16), dp(12), dp(16), dp(12))
         val card = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         root.addView(card)
+
+        // A family message takes over the panel until it is dismissed. It is not a task state, but
+        // the person has to see and hear it before the task can keep asking for attention.
+        if (circleMessage != null) {
+            circleMessageCard(card, circleMessage, circleChanged)
+            if (expanding) {
+                morph(fromWidth, fromHeight, card, true)
+            } else {
+                settle()
+                if (circleChanged) animateIn(card, 0)
+            }
+            return
+        }
 
         // A result renders its own heading, goal and conclusion; adding the generic header too
         // would print all three twice.
@@ -402,6 +424,7 @@ class OverlayService : Service() {
      * minute assumes it is broken.
      */
     private fun pillLabel(state: SessionState): String = when {
+        state.circleMessage != null -> "家人留言"
         session.voice.state.value == VoiceSession.State.RECORDING -> "正在听…"
         session.voice.state.value == VoiceSession.State.TRANSCRIBING -> "正在听懂…"
         state.needsPersonStep -> "等您操作"
@@ -500,6 +523,49 @@ class OverlayService : Service() {
             animatePop(heading, 0)
             animateIn(body, 90)
             animatePop(go, 170)
+        }
+    }
+
+    /**
+     * A message from a real person, shown as a card big enough to read and never mixed into the
+     * task's own messages. The body is the part to keep; the sender line says who is speaking.
+     */
+    private fun circleMessageCard(card: LinearLayout, message: PendingMessage, animate: Boolean) {
+        val sender = message.from.ifBlank { "家人" }
+        val isMessage = message.kind == "message"
+        val heading = OverlayUi.text(
+            this,
+            if (isMessage) "家人留言" else "家人的回应",
+            Elder.status.value,
+            OverlayUi.brand,
+            bold = true,
+        )
+        card.addView(heading)
+        card.addView(
+            OverlayUi.text(
+                this,
+                if (isMessage) "来自 $sender" else "$sender 来处理了",
+                Elder.hint.value,
+                OverlayUi.inkSoft,
+            ),
+        )
+        if (!isMessage && message.title.isNotBlank()) {
+            card.addView(
+                OverlayUi.text(this, message.title, Elder.heading.value, OverlayUi.ink, bold = true),
+            )
+        }
+        if (message.body.isNotBlank()) {
+            card.addView(
+                OverlayUi.tinted(this, message.body, OverlayUi.doneTint).apply {
+                    setPadding(dp(14), dp(12), dp(14), dp(12))
+                },
+            )
+        }
+        val dismiss = optionButton("知道了") { session.dismissCircleMessage() }
+        card.addView(dismiss)
+        if (animate) {
+            animatePop(heading, 0)
+            animatePop(dismiss, 120)
         }
     }
 
