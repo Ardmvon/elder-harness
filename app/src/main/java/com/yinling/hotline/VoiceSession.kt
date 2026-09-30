@@ -57,8 +57,18 @@ class VoiceSession(
 
     private var idleJob: Job? = null
 
+    /** True while the assistant is reading; the 20-second idle timer must not run then. */
+    private var assistantSpeaking = false
+
     /** When the "too short to be a sentence" notice was last shown. */
     private var lastTooShortNotice = 0L
+
+    init {
+        // TTS callbacks may arrive on a binder thread; move the state change back to Main.
+        app.speaker.onSpeakingChanged = { speaking ->
+            scope.launch { onAssistantSpeakingChanged(speaking) }
+        }
+    }
 
     val isActive: Boolean get() = mutableState.value != State.OFF
 
@@ -80,7 +90,12 @@ class VoiceSession(
         idleJob?.cancel()
         idleJob = null
         if (app.recorder.isRecording) app.recorder.stop()
+        // Hanging up the call must also stop the other side. Without this, tapping the circle to
+        // end the conversation could leave the assistant reading its last line to an empty room.
+        app.speaker.stop()
         set(State.OFF)
+        idleJob?.cancel()
+        idleJob = null
     }
 
     private fun openMicrophone() {
@@ -89,8 +104,12 @@ class VoiceSession(
         // thread, and touching a view from the wrong thread is what crashed the app here.
         val opened = app.recorder.start(
             // Interruption: the person speaking is the reason for the assistant to stop talking.
+            // The idle timer is cancelled here too, otherwise a sentence started near the end of the
+            // 20-second window could be cut off while the person is still talking.
             onSpeechStart = {
                 scope.launch {
+                    idleJob?.cancel()
+                    idleJob = null
                     app.speaker.stop()
                     set(State.RECORDING)
                 }
@@ -150,10 +169,26 @@ class VoiceSession(
 
     private fun armIdleTimer() {
         idleJob?.cancel()
+        idleJob = null
+        // The timer means "nobody has said anything for 20 seconds". That is only true when the
+        // person is not speaking and the assistant is not reading.
+        if (!isActive || assistantSpeaking || mutableState.value != State.LISTENING) return
         idleJob = scope.launch {
             delay(IDLE_TIMEOUT_MS)
             LoopLog.event("[voice] 会话超时，关麦")
             stop()
+        }
+    }
+
+    private fun onAssistantSpeakingChanged(speaking: Boolean) {
+        assistantSpeaking = speaking
+        if (speaking) {
+            idleJob?.cancel()
+            idleJob = null
+        } else {
+            // Speech finished: if the microphone is still open and waiting, give the person a fresh
+            // 20-second window to answer.
+            armIdleTimer()
         }
     }
 

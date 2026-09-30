@@ -27,6 +27,19 @@ class Speaker(private val app: HotlineApp) {
     private var engineName: String = ""
     private val prefs = app.getSharedPreferences("hotline", 0)
 
+    /** True from utterance start until done/error/stop; used to pause the microphone idle timer. */
+    @Volatile
+    var isSpeaking: Boolean = false
+        private set
+
+    /** Called when speech starts or stops. The listener may arrive on a TTS binder thread. */
+    var onSpeakingChanged: ((Boolean) -> Unit)? = null
+
+    /** The utterance currently allowed to change [isSpeaking]; older flushed ones are ignored. */
+    @Volatile
+    private var currentUtterance: String? = null
+    private var utteranceSerial = 0
+
     /** On by default: the people this is for are the least likely to go looking for the switch. */
     var enabled: Boolean
         get() = prefs.getBoolean("speak_replies", true)
@@ -55,19 +68,27 @@ class Speaker(private val app: HotlineApp) {
             engine?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                 override fun onStart(utteranceId: String?) {
                     LoopLog.event("[speak] 开始朗读")
+                    if (utteranceId == currentUtterance) setSpeaking(true)
                 }
 
                 override fun onDone(utteranceId: String?) {
                     LoopLog.event("[speak] 朗读完成")
+                    if (utteranceId == currentUtterance) setSpeaking(false)
                 }
 
                 @Deprecated("older signature is still the one that fires on some ROMs")
                 override fun onError(utteranceId: String?) {
                     LoopLog.event("[speak] 朗读失败")
+                    if (utteranceId == currentUtterance) setSpeaking(false)
                 }
 
                 override fun onError(utteranceId: String?, errorCode: Int) {
                     LoopLog.event("[speak] 朗读失败 code=$errorCode")
+                    if (utteranceId == currentUtterance) setSpeaking(false)
+                }
+
+                override fun onStop(utteranceId: String?, interrupted: Boolean) {
+                    if (utteranceId == currentUtterance) setSpeaking(false)
                 }
             })
             LoopLog.event("[speak] 使用引擎：$engineName")
@@ -114,7 +135,15 @@ class Speaker(private val app: HotlineApp) {
             .replace(Regex("\\s+"), " ")
             .trim()
         if (clean.isBlank()) return
-        engine?.speak(clean.take(240), TextToSpeech.QUEUE_FLUSH, null, "hotline")
+        val utterance = "hotline_${++utteranceSerial}"
+        currentUtterance = utterance
+        engine?.speak(clean.take(240), TextToSpeech.QUEUE_FLUSH, null, utterance)
+    }
+
+    private fun setSpeaking(speaking: Boolean) {
+        if (isSpeaking == speaking) return
+        isSpeaking = speaking
+        onSpeakingChanged?.invoke(speaking)
     }
 
     /** For the settings screen: whether this phone can speak at all. */
@@ -125,12 +154,16 @@ class Speaker(private val app: HotlineApp) {
     }
 
     fun stop() {
+        currentUtterance = null
         engine?.stop()
+        setSpeaking(false)
     }
 
     fun release() {
+        currentUtterance = null
         engine?.shutdown()
         engine = null
         ready = false
+        setSpeaking(false)
     }
 }
