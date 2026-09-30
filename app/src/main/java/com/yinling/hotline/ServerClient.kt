@@ -2,6 +2,7 @@ package com.yinling.hotline
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
 import java.net.HttpURLConnection
@@ -190,6 +191,25 @@ class ServerClient(private val app: HotlineApp) {
                 from = item.optString("from"),
             )
         }
+    }
+
+    /**
+     * Confirms that a downlink message was shown to the elder, or that they tapped "知道了".
+     *
+     * This is what moves the family's web page from "等待老人手机收取" to "已到手机" / "老人已看到".
+     * The server keeps the event queued until this succeeds, so a network failure is retried by the
+     * next heartbeat instead of losing the message.
+     */
+    suspend fun ackEvents(ids: List<Int>, read: Boolean): Boolean = withContext(Dispatchers.IO) {
+        if (!isConfigured() || ids.isEmpty()) return@withContext false
+        val payload = JSONObject()
+            .put("ids", JSONArray(ids))
+            .put("read", read)
+            .toString()
+        val json = request("POST", "/api/device/ack", payload, token)
+        val ok = json != null
+        LoopLog.event("[server] 回执 read=$read ids=${ids.joinToString(",")} ok=$ok")
+        ok
     }
 
     suspend fun postEvent(kind: String, title: String, body: String, context: String = ""): Boolean =

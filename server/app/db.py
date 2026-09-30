@@ -60,7 +60,10 @@ CREATE TABLE IF NOT EXISTS events (
     status      TEXT NOT NULL DEFAULT 'new' CHECK (status IN ('new', 'claimed', 'closed')),
     claimed_by  INTEGER REFERENCES circle(id),
     claimed_at  REAL,
-    delivered   INTEGER NOT NULL DEFAULT 0
+    -- delivered stays for older rows; delivered_at says when the phone displayed it.
+    delivered   INTEGER NOT NULL DEFAULT 0,
+    delivered_at REAL,
+    read_at     REAL
 );
 
 CREATE INDEX IF NOT EXISTS events_device_idx ON events (device_id, id);
@@ -80,6 +83,13 @@ def init(path: str | None = None) -> None:
         DB_PATH = path
     with connect() as connection:
         connection.executescript(SCHEMA)
+        # Existing demo databases predate the two receipt columns. SQLite has no
+        # "ADD COLUMN IF NOT EXISTS", so check the small schema first.
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(events)").fetchall()}
+        if "delivered_at" not in columns:
+            connection.execute("ALTER TABLE events ADD COLUMN delivered_at REAL")
+        if "read_at" not in columns:
+            connection.execute("ALTER TABLE events ADD COLUMN read_at REAL")
 
 
 @contextmanager
@@ -218,11 +228,36 @@ def pending_for_device(device_id: int) -> list[dict[str, Any]]:
         return [dict(row) for row in rows]
 
 
-def mark_delivered(ids: list[int]) -> None:
-    if not ids:
-        return
+def acknowledge_events(device_id: int, event_ids: list[int], read: bool = False) -> list[int]:
+    """Records that the phone displayed (or the elder read) its own downlink events."""
+    if not event_ids:
+        return []
+    placeholders = ",".join("?" for _ in event_ids)
+    now = time.time()
     with db() as connection:
-        connection.executemany("UPDATE events SET delivered = 1 WHERE id = ?", [(i,) for i in ids])
+        rows = connection.execute(
+            f"SELECT id FROM events WHERE device_id = ? AND direction = 'to_device' "
+            f"AND id IN ({placeholders})",
+            (device_id, *event_ids),
+        ).fetchall()
+        acked = [int(row["id"]) for row in rows]
+        if not acked:
+            return []
+        ids = ",".join("?" for _ in acked)
+        if read:
+            connection.execute(
+                f"UPDATE events SET delivered = 1, "
+                f"delivered_at = COALESCE(delivered_at, ?), read_at = COALESCE(read_at, ?) "
+                f"WHERE id IN ({ids})",
+                (now, now, *acked),
+            )
+        else:
+            connection.execute(
+                f"UPDATE events SET delivered = 1, delivered_at = COALESCE(delivered_at, ?) "
+                f"WHERE id IN ({ids})",
+                (now, *acked),
+            )
+    return acked
 
 
 def claim_event(event_id: int, circle_id: int) -> dict[str, Any] | None:
@@ -233,8 +268,9 @@ def claim_event(event_id: int, circle_id: int) -> dict[str, Any] | None:
             (circle_id, time.time(), event_id),
         )
         if cursor.rowcount == 0:
-            row = connection.execute("SELECT * FROM events WHERE id = ?", (event_id,)).fetchone()
-            return dict(row) if row else None
+            # Someone else already claimed it, or it is not a help/alert. Returning None is what
+            # lets the web layer say "已经有人接手" instead of queueing a second ack.
+            return None
         row = connection.execute("SELECT * FROM events WHERE id = ?", (event_id,)).fetchone()
         return dict(row) if row else None
 

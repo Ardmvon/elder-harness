@@ -137,6 +137,9 @@ class SessionController(private val app: HotlineApp) : FamilyGateway {
     private val circleQueue = ArrayDeque<PendingMessage>()
     private val shownCircleMessageIds = mutableSetOf<Int>()
 
+    /** Message id -> true means "elder saw it"; false means "shown but not yet read". */
+    private val pendingCircleAcks = linkedMapOf<Int, Boolean>()
+
     /** Id of the task currently loaded, so its transcript can be saved and resumed. */
     private var sessionId: String = newSessionId()
     private var loop: AgentLoop? = null
@@ -593,16 +596,29 @@ class SessionController(private val app: HotlineApp) : FamilyGateway {
                 added = true
             }
         }
-        if (!added) return
+        if (!added) {
+            // The server re-sent something because an earlier receipt failed. The heartbeat's own
+            // retry call handles it; do not show the card twice.
+            return
+        }
         LoopLog.event("[circle] 收到 ${messages.size} 条，待显示 ${circleQueue.size} 条")
         if (state.value.circleMessage == null) showNextCircleMessage()
     }
 
     /** The person has seen the message; show the next one, if any. */
     fun dismissCircleMessage() {
-        if (state.value.circleMessage == null) return
+        val message = state.value.circleMessage ?: return
+        queueCircleAck(message.id, read = true)
         mutableState.value = state.value.copy(circleMessage = null)
         showNextCircleMessage()
+    }
+
+    /** Retries receipts that failed while the server was unreachable. */
+    fun retryCircleAcks() {
+        pendingCircleAcks.keys.toList().forEach { id ->
+            val read = pendingCircleAcks[id] ?: return@forEach
+            sendCircleAck(id, read)
+        }
     }
 
     private fun showNextCircleMessage() {
@@ -611,6 +627,28 @@ class SessionController(private val app: HotlineApp) : FamilyGateway {
         mutableState.value = state.value.copy(circleMessage = message)
         LoopLog.event("[circle] 显示 id=${message.id} kind=${message.kind}")
         app.speaker.say(circleSpeech(message))
+        queueCircleAck(message.id, read = false)
+    }
+
+    /**
+     * Keeps the strongest state for an id: "read" is never downgraded back to "shown". The actual
+     * HTTP call runs in the background, and the server keeps the event queued until one succeeds.
+     */
+    private fun queueCircleAck(id: Int, read: Boolean) {
+        if (read) {
+            pendingCircleAcks[id] = true
+        } else if (!pendingCircleAcks.containsKey(id)) {
+            pendingCircleAcks[id] = false
+        }
+        sendCircleAck(id, pendingCircleAcks[id] == true)
+    }
+
+    private fun sendCircleAck(id: Int, read: Boolean) {
+        scope.launch {
+            if (server.ackEvents(listOf(id), read)) {
+                if (pendingCircleAcks[id] == read) pendingCircleAcks.remove(id)
+            }
+        }
     }
 
     private fun circleSpeech(message: PendingMessage): String {

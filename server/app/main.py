@@ -94,8 +94,9 @@ def heartbeat(
     """Proof of life, and the phone's inbox: whoever is running is also who gets told things."""
     device = device_from_auth(authorization)
     db.touch_device(device["id"], str(payload.get("note", ""))[:200])
+    # Delivered is set by the phone's /ack call, not here: handing a message to the phone and
+    # displaying it are two different things, and a crash between them must not eat the message.
     pending = db.pending_for_device(device["id"])
-    db.mark_delivered([event["id"] for event in pending])
     sender_names = {member["id"]: member["name"] for member in db.circle_of(device["id"])}
     return {
         "ok": True,
@@ -111,6 +112,32 @@ def heartbeat(
             for event in pending
         ],
     }
+
+
+@app.post("/api/device/ack")
+def acknowledge(
+    payload: dict[str, Any] = Body(default={}),
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """The phone confirms it displayed a message, or that the elder read it.
+
+    Only this device's own to_device events can be acknowledged, so one paired phone cannot mark
+    another phone's inbox as read.
+    """
+    device = device_from_auth(authorization)
+    raw_ids = payload.get("ids", [])
+    if not isinstance(raw_ids, list):
+        raise HTTPException(status_code=422, detail="ids 必须是数组")
+    ids: list[int] = []
+    for value in raw_ids[:100]:
+        try:
+            ids.append(int(value))
+        except (TypeError, ValueError):
+            continue
+    read = bool(payload.get("read", False))
+    acked = db.acknowledge_events(device["id"], ids, read=read)
+    log.info("[ack] device=%s read=%s ids=%s", device["id"], read, acked)
+    return {"ok": True, "read": read, "acked": acked}
 
 
 @app.get("/api/speech/status")

@@ -6,6 +6,7 @@ import base64
 import json
 import re
 import time
+from urllib.parse import unquote
 
 import pytest
 
@@ -101,8 +102,38 @@ def test_claiming_a_help_request_answers_the_phone(client, device):
 
     inbox = client.post("/api/device/heartbeat", json={}, headers=auth(device)).json()["pending"]
     assert any(item["kind"] == "ack" and "大女儿" in item["title"] for item in inbox)
-    # Delivered once: a message that reappears forever would be worse than none.
+    # Heartbeat only hands it over; the phone must confirm before the server stops resending it.
+    assert client.post("/api/device/heartbeat", json={}, headers=auth(device)).json()["pending"]
+    acked = client.post(
+        "/api/device/ack",
+        json={"ids": [item["id"] for item in inbox]},
+        headers=auth(device),
+    )
+    assert acked.status_code == 200 and set(acked.json()["acked"]) == {item["id"] for item in inbox}
     assert client.post("/api/device/heartbeat", json={}, headers=auth(device)).json()["pending"] == []
+
+
+def test_second_claim_does_not_queue_another_ack(client, device):
+    join(client, device, name="大女儿")
+    created = client.post(
+        "/api/device/events",
+        json={"kind": "help", "title": "需要人帮忙", "body": "卡在验证码"},
+        headers=auth(device),
+    ).json()
+
+    first = client.post(f"/family/claim/{created['id']}", follow_redirects=False)
+    assert first.status_code == 303
+
+    second = client.post(f"/family/claim/{created['id']}", follow_redirects=False)
+    assert second.status_code == 303
+    assert "已经有人接手" in unquote(second.headers["location"])
+
+    with db.db() as connection:
+        ack_count = connection.execute(
+            "SELECT COUNT(*) FROM events WHERE device_id = ? AND kind = 'ack' AND direction = 'to_device'",
+            (device["device_id"],),
+        ).fetchone()[0]
+    assert ack_count == 1
 
 
 def test_community_cannot_put_words_on_the_elder_phone(client, device):
@@ -118,6 +149,52 @@ def test_family_message_reaches_the_phone(client, device):
     inbox = client.post("/api/device/heartbeat", json={}, headers=auth(device)).json()["pending"]
     assert inbox and inbox[0]["body"] == "明天下午我来看你"
     assert inbox[0]["from"] == "大女儿"
+
+
+def test_family_message_receipt_goes_from_waiting_to_seen(client, device):
+    join(client, device, name="大女儿")
+    client.post("/family/message", data={"text": "记得吃药"}, follow_redirects=False)
+
+    page = client.get("/family").text
+    assert "等待老人手机收取" in page
+
+    inbox = client.post("/api/device/heartbeat", json={}, headers=auth(device)).json()["pending"]
+    assert inbox
+    page = client.get("/family").text
+    assert "等待老人手机收取" in page  # handing it to the phone is not display yet
+
+    response = client.post(
+        "/api/device/ack",
+        json={"ids": [inbox[0]["id"]]},
+        headers=auth(device),
+    )
+    assert response.status_code == 200
+    assert "已到手机" in client.get("/family").text
+    assert "老人已看到" not in client.get("/family").text
+
+    response = client.post(
+        "/api/device/ack",
+        json={"ids": [inbox[0]["id"]], "read": True},
+        headers=auth(device),
+    )
+    assert response.status_code == 200
+    page = client.get("/family").text
+    assert "老人已看到" in page
+    # After the read receipt, the server must not send it again.
+    assert client.post("/api/device/heartbeat", json={}, headers=auth(device)).json()["pending"] == []
+
+
+def test_ack_cannot_touch_another_devices_inbox(client, device):
+    other = client.post("/api/device/pair", json={"elder_name": "爸爸"}).json()
+    event = db.add_event(device["device_id"], "message", "to_device", title="留言", body="给我的")
+    response = client.post(
+        "/api/device/ack",
+        json={"ids": [event["id"]], "read": True},
+        headers=auth(other),
+    )
+    assert response.status_code == 200 and response.json()["acked"] == []
+    inbox = client.post("/api/device/heartbeat", json={}, headers=auth(device)).json()["pending"]
+    assert [item["id"] for item in inbox] == [event["id"]]
 
 
 def test_community_sees_that_help_is_needed_but_not_the_context(client, device):

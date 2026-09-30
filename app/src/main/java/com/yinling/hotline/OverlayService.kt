@@ -206,6 +206,9 @@ class OverlayService : Service() {
                 LoopLog.event("[server] 收到 ${message.kind}：${message.title} ${message.body}")
             }
             if (pending.isNotEmpty()) session.receiveCircleMessages(pending)
+            // Receipts survive a failed request even when the server no longer re-sends the event
+            // (for example a read receipt after the displayed receipt already succeeded).
+            session.retryCircleAcks()
         }.onFailure { LoopLog.event("[server] 心跳失败：${it.message}") }
     }
 

@@ -147,12 +147,21 @@ def dashboard(
         if event["context"] and role == "family":
             context = f"<div class='ctx'>{escape(event['context'])}</div>"
         body_html = f"<div>{escape(event['body'])}</div>" if event["body"] else ""
+        receipt = ""
+        if event["direction"] == "to_device" and event["kind"] in ("message", "ack"):
+            if event["read_at"]:
+                receipt = f"<div class='muted ok'>老人已看到 {clock(event['read_at'])}</div>"
+            elif event["delivered_at"] or event["delivered"]:
+                when = f" {clock(event['delivered_at'])}" if event["delivered_at"] else ""
+                receipt = f"<div class='muted'>已到手机{when}</div>"
+            else:
+                receipt = "<div class='muted'>等待老人手机收取</div>"
         return (
             f"<div class='card {'claimed' if event['status'] == 'claimed' else ''}'>"
             f"<span class='kind'>{escape(label)}</span>"
             f"<span class='muted'>{clock(event['created_at'])}</span>"
             f"<div><b>{escape(event['title'])}</b></div>"
-            f"{body_html}{context}{extra}</div>"
+            f"{body_html}{context}{receipt}{extra}</div>"
         )
 
     help_html = "".join(
