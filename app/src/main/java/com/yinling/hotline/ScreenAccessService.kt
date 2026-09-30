@@ -16,6 +16,7 @@ import android.view.Display
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
+import androidx.annotation.RequiresApi
 import com.yinling.core.ScreenElement
 import com.yinling.core.ScreenImage
 import com.yinling.core.ScreenSnapshot
@@ -746,8 +747,11 @@ class ScreenAccessService : AccessibilityService() {
         return withContext(Dispatchers.Default) { encodeShot(bitmap, screen) }
     }
 
-    /** Scaling, compression and base64 for one screenshot. CPU-bound: call it off the main thread. */
-    @android.annotation.TargetApi(android.os.Build.VERSION_CODES.R)
+    /**
+     * Scaling, compression and base64 for one screenshot. CPU-bound: call it off the main thread.
+     * Requires API 30 for WEBP_LOSSLESS; its only caller, [screenshot], returns early below that.
+     */
+    @RequiresApi(Build.VERSION_CODES.R)
     private fun encodeShot(bitmap: Bitmap, screen: ScreenSnapshot): ToolResult {
         val scaled = scaleForModel(bitmap)
         // Drawing needs a mutable bitmap, and both scaleForModel's result and the hardware-buffer

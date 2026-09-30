@@ -12,7 +12,7 @@
     <!-- 平安确认给家人发消息 -->
     <uses-permission android:name="android.permission.SEND_SMS" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
-    <!-- ChromeOS can install the app without telephony; SMS is an optional channel. -->
+    <!-- SEND_SMS 默认隐含"必须有电话硬件"；短信只是平安确认的一个通道，没有电话功能的设备也应能安装 -->
     <uses-feature android:name="android.hardware.telephony" android:required="false" />
 
     <queries>
