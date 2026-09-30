@@ -20,11 +20,22 @@ data class Skill(
     /** Shown in the page text when this app is in the foreground; empty falls back to a generic line. */
     val hint: String = "",
     val body: String,
+    /** Generated skills use these; the six hand-written skills keep the defaults. */
+    val version: Int = 1,
+    val status: String = "active",
+    val source: String = "manual",
 )
 
 object SkillCatalog {
 
-    val skills: List<Skill> = listOf(
+    /**
+     * Skills the model has earned from a verified run. [HotlineApp] refreshes this from [SkillStore]
+     * after startup and after the family adopts or rolls back a candidate.
+     */
+    @Volatile
+    var generated: List<Skill> = emptyList()
+
+    private val builtin: List<Skill> = listOf(
         Skill(
             name = "reading_tables",
             description = "读表格、课表、账单这类格子内容时的方法（防止把相邻列的内容读成目标列）",
@@ -111,6 +122,10 @@ object SkillCatalog {
         ),
     )
 
+    /** Built-in knowledge plus generated skills the family has adopted. */
+    val skills: List<Skill>
+        get() = builtin + generated
+
     /**
      * Skills are listed once, in the [toolSpec] description: the model must read that schema to
      * call the tool at all. Listing them again in the system prompt only wasted fixed tokens.
@@ -132,18 +147,19 @@ object SkillCatalog {
 
     fun find(name: String): Skill? = skills.find { it.name == name }
 
-    val toolSpec = AgentToolSpec(
-        // A pure lookup: asking again returns the same text, which is never progress.
-        informational = true,
-        name = "load_skill",
-        description = "读取某个经验技巧的详细步骤。包含：" +
-            skills.joinToString("；") { "${it.name}（${it.description}）" },
-        parameters = listOf(
-            // Named "argument" on purpose: the loop only forwards a fixed set of argument names
-            // (argument/target/text/...), so a parameter called "name" would arrive empty.
-            AgentToolSpec.ToolParam("argument", "string", "技巧名称，见本工具说明", required = true),
-        ),
-    )
+    val toolSpec: AgentToolSpec
+        get() = AgentToolSpec(
+            // A pure lookup: asking again returns the same text, which is never progress.
+            informational = true,
+            name = "load_skill",
+            description = "读取某个经验技巧的详细步骤。包含：" +
+                skills.joinToString("；") { "${it.name}（${it.description}）" },
+            parameters = listOf(
+                // Named "argument" on purpose: the loop only forwards a fixed set of argument names
+                // (argument/target/text/...), so a parameter called "name" would arrive empty.
+                AgentToolSpec.ToolParam("argument", "string", "技巧名称，见本工具说明", required = true),
+            ),
+        )
 
     /** @return the skill body, or a failure explaining what names exist. */
     fun load(call: ToolCall): ToolResult {

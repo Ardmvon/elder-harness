@@ -14,11 +14,21 @@ class HotlineApp : Application() {
     /** Records one utterance for the server-side recogniser. */
     val recorder: VoiceRecorder by lazy { VoiceRecorder() }
 
+    /** Reads/writes generated skills under files/skills/. */
+    val skills: SkillStore by lazy { SkillStore(this) }
+
     override fun onCreate() {
         super.onCreate()
         LoopLog.attach(this)
+        skills.seedDemoCandidateIfNeeded()
+        refreshSkills()
         session = SessionController(this)
         LoopLog.enabled = session.developerMode
+    }
+
+    /** Makes the current active files visible to the model's load_skill catalog. */
+    fun refreshSkills() {
+        SkillCatalog.generated = skills.activeSkills()
     }
 
     /** The system screen where a speech engine is installed or chosen. */

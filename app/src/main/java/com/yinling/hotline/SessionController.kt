@@ -5,7 +5,9 @@ import android.net.Uri
 import com.yinling.core.ActionApproval
 import com.yinling.core.AgentHook
 import com.yinling.core.AgentLoop
+import com.yinling.core.AgentMessage
 import com.yinling.core.AgentOutcome
+import com.yinling.core.AgentStep
 import com.yinling.core.DecisionCache
 import com.yinling.core.ScreenSnapshot
 import com.yinling.core.ToolInvocation
@@ -34,6 +36,8 @@ data class SessionState(
     val needsPersonStep: Boolean = false,
     /** A message from the trusted circle, shown as a big card and read aloud. */
     val circleMessage: PendingMessage? = null,
+    /** The task passed the local completion check; waiting for the elder to say "this worked". */
+    val awaitingSuccessConfirmation: Boolean = false,
 )
 
 interface FamilyGateway {
@@ -139,6 +143,14 @@ class SessionController(private val app: HotlineApp) : FamilyGateway {
 
     /** Message id -> true means "elder saw it"; false means "shown but not yet read". */
     private val pendingCircleAcks = linkedMapOf<Int, Boolean>()
+
+    /** Package of the last page the planner saw, used only as a skill applicability hint. */
+    private var lastScreenApp: String? = null
+
+    /** One text-only model call that turns a verified transcript into a candidate skill. */
+    private val skillWriter = SkillWriter { instructions, prompt ->
+        askPlannerForText(instructions, prompt)
+    }
 
     /** Id of the task currently loaded, so its transcript can be saved and resumed. */
     private var sessionId: String = newSessionId()
@@ -275,6 +287,36 @@ class SessionController(private val app: HotlineApp) : FamilyGateway {
         }
     }
 
+    /**
+     * The elder confirms this result was real. Only now do we summarize the run into a candidate
+     * skill; the model's own "done" is not enough, and the skill is not active until the family
+     * adopts it in settings.
+     */
+    fun confirmTaskSuccess() {
+        if (state.value.phase != TaskPhase.COMPLETED || !state.value.awaitingSuccessConfirmation) return
+        val running = loop ?: return
+        val goal = state.value.goal
+        val startedSession = sessionId
+        mutableState.value = state.value.copy(
+            awaitingSuccessConfirmation = false,
+            message = "正在把这次步骤记成候选技巧…",
+        )
+        scope.launch {
+            val skill = runCatching {
+                skillWriter.draft(goal, lastScreenApp, running.conversation)
+            }.getOrNull()
+            if (sessionId != startedSession) return@launch
+            val saved = skill != null && app.skills.saveCandidate(skill)
+            mutableState.value = state.value.copy(
+                message = if (saved) {
+                    "已把这次步骤记成候选技巧，可在「家人设置 → 技巧」里查看。"
+                } else {
+                    "这次步骤没记下来，不影响刚才的结果。"
+                },
+            )
+        }
+    }
+
     private fun launch(resume: Boolean) {
         job?.cancel()
         pendingApprovalPrompt = null
@@ -323,6 +365,7 @@ class SessionController(private val app: HotlineApp) : FamilyGateway {
         hook = hook,
         cache = cache,
         renderScreen = { screen ->
+            lastScreenApp = screen.app
             com.yinling.core.PhoneToolCatalog.render(screen) +
                 SkillCatalog.hintFor(screen.app) +
                 keyboardNote(screen)
@@ -354,6 +397,28 @@ class SessionController(private val app: HotlineApp) : FamilyGateway {
     }
 
     private fun logPlanner(message: String) = LoopLog.event("[planner] $message")
+
+    /** A one-off text completion for the skill writer, using the same model as the task. */
+    private suspend fun askPlannerForText(instructions: String, prompt: String): String? {
+        val planner = CloudPlanner(
+            config = ModelConfig(endpoint, model, apiKey, visionEnabled),
+            log = ::logPlanner,
+        )
+        return when (
+            val step = planner.decide(
+                instructions,
+                emptyList(),
+                listOf(AgentMessage(AgentMessage.Role.USER, content = prompt)),
+            )
+        ) {
+            is AgentStep.Final -> step.message
+            is AgentStep.Failure -> {
+                LoopLog.event("[skill] 总结失败：${step.message}")
+                null
+            }
+            is AgentStep.Calls -> null
+        }
+    }
 
     private fun approval() = object : ActionApproval {
         /**
@@ -471,7 +536,7 @@ class SessionController(private val app: HotlineApp) : FamilyGateway {
                 rememberRecipe()
                 mutableState.value = state.value.copy(
                     message = outcome.message, phase = TaskPhase.COMPLETED,
-                    step = steps, hasPendingApproval = false,
+                    step = steps, hasPendingApproval = false, awaitingSuccessConfirmation = true,
                 )
             }
             is AgentOutcome.PAUSED -> mutableState.value = state.value.copy(

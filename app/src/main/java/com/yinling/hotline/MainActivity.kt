@@ -253,6 +253,7 @@ class MainActivity : ComponentActivity() {
                                 moveTaskToBack(true)
                             },
                             onDismissCircleMessage = session::dismissCircleMessage,
+                            onConfirmSuccess = session::confirmTaskSuccess,
                         )
                     }
                 }
@@ -316,6 +317,7 @@ private fun HomePage(
     onFinish: () -> Unit,
     onRestore: (String) -> Unit,
     onDismissCircleMessage: () -> Unit,
+    onConfirmSuccess: () -> Unit,
     answer: String,
     onAnswerChange: (String) -> Unit,
     onAnswer: (String) -> Unit,
@@ -455,7 +457,12 @@ private fun HomePage(
 
                 state.phase == TaskPhase.COMPLETED -> ElderCard {
                     Text(state.message, fontSize = Elder.body)
-                    ElderPrimaryButton("知道了", onFinish)
+                    if (state.awaitingSuccessConfirmation) {
+                        ElderPrimaryButton("这次办成了，记住这个方法", onConfirmSuccess)
+                        ElderSecondaryButton("知道了", onFinish)
+                    } else {
+                        ElderPrimaryButton("知道了", onFinish)
+                    }
                 }
 
                 else -> Unit
@@ -607,6 +614,8 @@ private fun SettingsPage(session: SessionController, onBack: () -> Unit) {
         KeepAliveSection()
         Spacer(Modifier.height(8.dp))
         PeaceSection()
+        Spacer(Modifier.height(8.dp))
+        SkillSection()
         Spacer(Modifier.height(8.dp))
         ServerSection()
         Button(onClick = {
@@ -770,6 +779,98 @@ private fun PeaceSection() {
             },
             modifier = Modifier.fillMaxWidth(),
         ) { Text("现在检查一次（不会发送）") }
+    }
+}
+
+/**
+ * A deliberately small window into generated skills.
+ *
+ * The model's flow summaries are not trusted immediately: they land in candidate/, the family can
+ * view them, adopt one, and roll it back to retired/. Only active files are handed to the planner.
+ */
+@Composable
+private fun SkillSection() {
+    val context = LocalContext.current
+    val app = context.applicationContext as HotlineApp
+    val store = remember { app.skills }
+    var tick by remember { mutableIntStateOf(0) }
+    var expanded by remember { mutableStateOf<String?>(null) }
+    val candidates = remember(tick) { store.candidateSkills() }
+    val active = remember(tick) { SkillCatalog.skills }
+
+    fun refresh() {
+        app.refreshSkills()
+        tick++
+    }
+
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("技巧", fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+        Text(
+            "模型从成功任务里总结出的流程先进入候选；采用后才会出现在 load_skill 里，可随时回退。" +
+                "这里只存文字步骤，不存截图，也不自动执行关键操作。",
+            fontSize = 15.sp,
+        )
+
+        Text("候选技巧", fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+        if (candidates.isEmpty()) {
+            Text("暂无候选技巧。", fontSize = 15.sp, color = Color.DarkGray)
+        }
+        candidates.forEach { skill ->
+            ElderCard {
+                Text(skill.description, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+                Text("${skill.name} · v${skill.version} · 候选", fontSize = 13.sp, color = Color.DarkGray)
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    TextButton(onClick = {
+                        expanded = if (expanded == skill.name) null else skill.name
+                    }) { Text("查看") }
+                    TextButton(onClick = {
+                        if (runCatching { store.promote(skill.name) }.getOrDefault(false)) {
+                            Toast.makeText(context, "已采用，下一次任务会看到它", Toast.LENGTH_SHORT).show()
+                            refresh()
+                        } else {
+                            Toast.makeText(context, "采用失败，候选文件可能已移动", Toast.LENGTH_SHORT).show()
+                        }
+                    }) { Text("采用") }
+                    TextButton(onClick = {
+                        if (runCatching { store.deleteCandidate(skill.name) }.getOrDefault(false)) {
+                            refresh()
+                        }
+                    }) { Text("删除") }
+                }
+                if (expanded == skill.name) {
+                    Text(skill.body, fontSize = 14.sp)
+                }
+            }
+        }
+
+        Text("当前生效的技巧", fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+        active.forEach { skill ->
+            ElderCard {
+                Text(skill.description, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+                Text(
+                    "${skill.name} · v${skill.version} · " +
+                        (if (skill.source == "learned") "模型生成" else "内置"),
+                    fontSize = 13.sp,
+                    color = Color.DarkGray,
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    TextButton(onClick = {
+                        expanded = if (expanded == skill.name) null else skill.name
+                    }) { Text("查看") }
+                    if (skill.source == "learned") {
+                        TextButton(onClick = {
+                            if (runCatching { store.retire(skill.name) }.getOrDefault(false)) {
+                                Toast.makeText(context, "已回退，下一次任务不再加载它", Toast.LENGTH_SHORT).show()
+                                refresh()
+                            }
+                        }) { Text("回退") }
+                    }
+                }
+                if (expanded == skill.name) {
+                    Text(skill.body, fontSize = 14.sp)
+                }
+            }
+        }
     }
 }
 

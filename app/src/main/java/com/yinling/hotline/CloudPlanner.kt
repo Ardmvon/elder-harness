@@ -66,8 +66,11 @@ class CloudPlanner(
             // before they answer. Without an explicit budget the provider's default can be eaten
             // by the reasoning, and the answer or the tool call comes back truncated.
             put("max_tokens", MAX_COMPLETION_TOKENS)
-            put("tools", JSONArray(tools.map(::wireTool)))
-            put("tool_choice", "auto")
+            // Empty tools is used for the post-task skill summarizer: it must answer with text.
+            if (tools.isNotEmpty()) {
+                put("tools", JSONArray(tools.map(::wireTool)))
+                put("tool_choice", "auto")
+            }
         }
 
         val url = try {

@@ -636,6 +636,11 @@ class OverlayService : Service() {
             }
         })
 
+        if (state.awaitingSuccessConfirmation) {
+            val remember = optionButton("这次办成了，记住这个方法") { session.confirmTaskSuccess() }
+            card.addView(remember)
+            if (phaseChanged) animatePop(remember, 160)
+        }
         val dismiss = optionButton("知道了") { expanded = false; render(session.state.value) }
         card.addView(dismiss)
         row(card, "打开" to { openHome() }, "找家人" to { familyRow(card, state) })
