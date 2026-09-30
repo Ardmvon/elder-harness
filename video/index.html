@@ -25,7 +25,7 @@
 <script type="module">
 import * as THREE from 'three'
 import { Stage } from './src/stage.js'
-import { SHOTS, DURATION, FPS, WIDTH, HEIGHT } from './src/timeline.js'
+import { SHOTS, DURATION, FPS, WIDTH, HEIGHT, FILM, cueSheet } from './src/timeline.js'
 
 // Any thrown error must reach the renderer, otherwise a broken shader produces
 // 3600 identical black frames and looks like a very slow render.
@@ -42,18 +42,21 @@ window.addEventListener('unhandledrejection', ev => fail(ev.reason))
 try {
   const stage = new Stage({ width: WIDTH, height: HEIGHT })
   for (const shot of SHOTS) stage.add(shot)
+  stage.setFilm(FILM)
   window.__stage = stage
   window.__THREE = THREE  // debug hook: lets a CDP probe read the live scene graph
 
   // The render driver calls this. It is the ONLY way the film advances, so
   // offline extraction and live preview cannot diverge.
-  window.__renderAt = (t) => {
+  window.__renderAt = (t, opts) => {
     try {
       const clamped = Math.max(0, Math.min(DURATION - 1e-6, t))
-      stage.renderAt(clamped)
+      stage.renderAt(clamped, opts)
     } catch (e) { fail(e) }
   }
 
+  window.__cues = () => cueSheet()
+  window.__duration = DURATION
   window.__film = {
     title: '银龄智办 — 可信跨应用助老智能体',
     duration: DURATION,

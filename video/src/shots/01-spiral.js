@@ -23,6 +23,7 @@ import { defineShot } from '../stage.js'
 import { makeTextTexture } from '../text.js'
 import { NOISE, COMMON } from '../glsl.js'
 import { makeSparks, sampleGlyphPoints, coilPoint } from '../props.js'
+import { makeCoilField, COIL_POSE, FIELD_SEED } from '../field.js'
 import { smooth01, easeInOut } from '../ease.js'
 
 const NODES = [
@@ -46,26 +47,33 @@ const PARTICLES = 36000
 // them to frame the camera, and a const inside build() is invisible there.
 const TURNS = 1.5
 const HEIGHT = 3.6
-const GROUP_SCALE = 0.85
-const GROUP_Y = 0.10
+const GROUP_SCALE = COIL_POSE.scale
+const GROUP_Y = COIL_POSE.y
 
 // The beat sheet. Exported so the storyboard doc and the shot cannot drift.
 export const BEATS = {
-  assembleStart: 0.40, assembleEnd: 2.60,
-  labelStart: 2.00, labelStagger: 0.14, labelFade: 0.45,
-  labelOutStart: 3.90, labelOutDur: 0.50,
-  titleIn: 4.25, titleInDur: 0.85,
-  subIn: 4.55, subInDur: 0.85,
+  assembleStart: 1.00, assembleEnd: 6.50,
+  labelStart: 4.60, labelStagger: 0.34, labelFade: 1.10,
+  labelOutStart: 9.30, labelOutDur: 1.20,
+  titleIn: 10.10, titleInDur: 1.40,
+  subIn: 10.60, subInDur: 1.40,
   // The handoff: the title comes apart into sparks that land on the coil. Shot 2 opens with
   // those same sparks (same formula, same seed) and gathers them into the phone, so the cut
   // lands mid-motion instead of between two unrelated images.
-  dissolveStart: 5.15, dissolveDur: 0.80,
+  dissolveStart: 12.30, dissolveDur: 2.20,
 }
 
 export const shotSpiral = defineShot({
   name: 'spiral',
   start: 0,
-  duration: 6,
+  duration: 15,
+
+  // ---- film metadata (read by timeline.js -> the presentation layer and the cue sheet)
+  chapter: { num: '序', zh: '开机', en: 'COLD OPEN' },
+  subs: [[10.9, 14.6, '银龄智办', 'A trustworthy cross-app assistant for older people.']],
+  sfx: [[1.0, 'riser', { dur: 5.0 }], [6.5, 'chime', { midi: 76 }], [12.3, 'whoosh', { dur: 1.6 }]],
+  hits: [],
+  mb: 4,
 
   build(stage) {
     const g = new THREE.Group()
@@ -83,33 +91,14 @@ export const shotSpiral = defineShot({
       return new THREE.Vector3(Math.cos(ang) * rad, (u - 0.5) * HEIGHT, Math.sin(ang) * rad)
     }
 
-    // --- the sparks
-    const positions = new Float32Array(PARTICLES * 3)
-    const targets = new Float32Array(PARTICLES * 3)
-    const seeds = new Float32Array(PARTICLES)
-    const rels = new Float32Array(PARTICLES)
-
-    for (let i = 0; i < PARTICLES; i++) {
-      const u = Math.pow(Math.random(), 0.65)
-      const p = spiralPoint(u)
-      // Scatter around the spine. This number IS the shot: at 0.055 the helix
-      // collapses into a 1-pixel filament and additive blending saturates it to
-      // a white scratch. At 0.9 the spine disappears inside the cloud.
-      const j = 0.30 * (1 - u * 0.45)
-      targets[i * 3 + 0] = p.x + (Math.random() - 0.5) * j
-      targets[i * 3 + 1] = p.y + (Math.random() - 0.5) * j
-      targets[i * 3 + 2] = p.z + (Math.random() - 0.5) * j
-
-      const theta = Math.random() * Math.PI * 2
-      const phi = Math.acos(2 * Math.random() - 1)
-      const r = 5.5 + Math.random() * 3.5
-      positions[i * 3 + 0] = r * Math.sin(phi) * Math.cos(theta)
-      positions[i * 3 + 1] = r * Math.cos(phi) * 0.6
-      positions[i * 3 + 2] = r * Math.sin(phi) * Math.sin(theta)
-
-      seeds[i] = Math.random()
-      rels[i] = u
-    }
+    // --- the sparks: the shared, seeded field. Shot 2 continues these exact points, so
+    // the cut is a hand-off rather than two different clouds. (This also replaced
+    // Math.random(), which made the layout differ between page loads.)
+    const field = makeCoilField({ count: PARTICLES, seed: FIELD_SEED })
+    const positions = field.escape
+    const targets = field.coil
+    const seeds = field.seeds
+    const rels = field.us
 
     const geo = new THREE.BufferGeometry()
     geo.setAttribute('position', new THREE.BufferAttribute(positions, 3))
@@ -316,7 +305,7 @@ export const shotSpiral = defineShot({
 
     u.uTime.value = t
     u.uAssemble.value = clamp01((local - B.assembleStart) / (B.assembleEnd - B.assembleStart))
-    u.uOpacity.value = smooth01(local, 0, 0.7)
+    u.uOpacity.value = smooth01(local, 0, 1.4)
 
     // The labels have their own life: in staggered, out together, both gone
     // before the wordmark arrives.
@@ -351,7 +340,10 @@ export const shotSpiral = defineShot({
       const u = g.userData.sparkMat.uniforms
       u.uMorph.value = dissolve
       u.uTime.value = t
-      u.uOpacity.value = smooth01(local, B.dissolveStart - 0.25, 0.45)
+      // The title's sparks merge into the coil and are gone by the cut: at t=6.0 the frame
+      // must contain exactly the shared field, or the hand-off reads as a density drop.
+      const merge = 1 - smooth01(local, 14.15, 0.85)
+      u.uOpacity.value = smooth01(local, B.dissolveStart - 0.25, 0.45) * merge
     }
 
     // --- camera: a slow push in from three-quarters.
@@ -361,7 +353,7 @@ export const shotSpiral = defineShot({
     // is derived from the object's own size rather than guessed — the helix
     // stands HEIGHT tall (times GROUP_SCALE), and at fov 38 the visible
     // half-height at distance d is d*tan(19deg).
-    const k = easeInOut(local / 6)
+    const k = easeInOut(local / 15)
     const halfH = (HEIGHT * GROUP_SCALE / 2 + 1.0) / Math.tan(THREE.MathUtils.degToRad(stage.camera.fov / 2))
     const dist = halfH * 1.05 - 0.9 * k
     const swing = -0.42 + 0.22 * k

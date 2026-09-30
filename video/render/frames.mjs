@@ -25,6 +25,8 @@ const ONLY = args.only ?? null
 const FORMAT = args.format ?? 'jpeg'
 const QUALITY = args.quality ?? 92
 const OUT = join(ROOT, args.out ?? 'out/frames')
+// --mb: motion blur, one average of the shot's own `mb` sub-frames per frame.
+const MB = args.mb ? { samples: 'auto', shutter: args.shutter ?? 0.5, fps: FPS } : null
 
 const server = await serve()
 const browser = await launch({ width: 1920, height: 1080, port: args.port ?? 9222 })
@@ -61,6 +63,7 @@ try {
   console.log(`film "${info.title}" ${info.duration}s @ ${FPS}fps`)
   console.log(`frames ${first}..${last - 1} (${total})`)
   console.log(`shots: ${info.shots.map(s => `${s.name}@${s.start}s`).join('  ')}`)
+  console.log(`motion blur: ${MB ? `on (${MB.shutter} shutter, up to 4 sub-frames)` : 'off'}`)
 
   if (args.clean && existsSync(OUT)) rmSync(OUT, { recursive: true, force: true })
   mkdirSync(OUT, { recursive: true })
@@ -69,7 +72,7 @@ try {
   const ext = extFor(FORMAT)
   for (let f = first; f < last; f++) {
     const t = f / FPS
-    const dataURL = await evalStr(session, captureExpr(t, FORMAT, QUALITY))
+    const dataURL = await evalStr(session, captureExpr(t, FORMAT, QUALITY, MB))
     writeFileSync(join(OUT, `f${String(f).padStart(6, '0')}.${ext}`), decodeDataURL(dataURL))
     // A shot that throws keeps producing frames — black ones — and the run still "succeeds".
     // index.html records the error; surfacing it here is the difference between a finished

@@ -11,10 +11,12 @@
 // that drew it, is guaranteed to see the buffer we just wrote.
 
 /** An expression that renders frame time `t` and returns it as a data URL. */
-export function captureExpr(t, format = 'jpeg', quality = 92) {
+export function captureExpr(t, format = 'jpeg', quality = 92, opts = null) {
   const args = format === 'jpeg' ? `'image/jpeg', ${quality}` : `'image/png'`
+  // opts carries the motion-blur settings: { samples: 'auto' | N, shutter, fps }.
+  const pass = opts ? `, ${JSON.stringify(opts)}` : ''
   return `(() => {
-    window.__renderAt(${Number(t).toFixed(6)});
+    window.__renderAt(${Number(t).toFixed(6)}${pass});
     const c = document.querySelector('canvas');
     return c.toDataURL(${args});
   })()`

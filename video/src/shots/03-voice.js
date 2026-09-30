@@ -1,166 +1,249 @@
 // Shot 3 — 插话与步骤播报 (0:12–0:18)
 //
 // Two claims, one image each:
-//   the person can interrupt the assistant mid-sentence (the ring is cut from the inside
-//   and reverses), and they hear every step as it happens rather than a summary at the end.
+//   the person can interrupt the assistant mid-sentence, and they hear every step as it
+//   happens rather than a summary at the end.
 //
-// The reversal is deliberate: a normal "stop" animation would shrink a ring that is still
-// expanding outward, which reads as a fade. Reversing the phase and stepping the colour
-// brand -> attention is what makes it read as being talked over.
+// Motion design (Apple grammar):
+//   * three rings, each one a speaker: orange = the microphone is open (the person),
+//     green = the assistant. Colour is the interface language the shots share.
+//   * the interruption is not a fade. The assistant's ring collapses inward, its phase
+//     reverses, its colour steps to orange, and a single very short optical pulse
+//     (bloom + chromatic aberration) lands on the cut — a flinch, then stillness.
+//   * the steps are frosted pills that slide in from the right, one at a time. The newest
+//     is at full strength; the older ones step back to half, so attention has one home.
+//   * the camera arcs once and reacts to the interruption with a damped impulse, not a
+//     shake. A shake reads as a glitch; a settle reads as a decision.
 
 import * as THREE from 'three'
 import { defineShot } from '../stage.js'
 import {
-  makePhone, makeSubtitle, makeLabel, makeSoundRing, paintHomeScreen, setGroupOpacity,
+  makePhone, makeSoundRing, makePill, paintHomeScreen,
   makeSet, makeMirror, distanceFor, BRAND, ATTENTION, INK_BG,
 } from '../props.js'
-import { smooth01, easeOut } from '../ease.js'
+import { EASE, ramp } from '../ease.js'
 
 export const BEATS = {
-  ring1Start: 0.25, ring1Life: 1.35,
-  ring2Start: 1.75, cutAt: 2.35, ring2Life: 0.85,
-  bubbleStart: 2.80, bubbleStagger: 0.72, bubbleLife: 1.15,
-  subtitleIn: 3.40, subtitleInDur: 0.70,
+  ring1At: 0.45, ring1Life: 2.80,          // the person speaks: mic ring, orange
+  assistantAt: 3.05, assistantGrow: 1.60,  // the assistant answers: brand ring
+  cutAt: 4.95, cutLife: 1.20,              // the person talks over it
+  ring3At: 5.55, ring3Life: 2.40,          // the mic takes over, orange
+  stepAt: 6.40, stepStagger: 1.30, stepDur: 1.20,
 }
 
 const STEPS = ['正在打开微信', '正在找到文件传输助手', '正在把文字填进去']
 
 export const shotVoice = defineShot({
   name: 'voice',
-  start: 12,
-  duration: 6,
+  start: 27,
+  duration: 13,
+
+  // ---- film metadata (chapter Ⅰ continues; the heading was set up by shot 2)
+  subs: [[9.4, 12.8, '说得进去，也插得进去', 'You can talk over it — and it stops.']],
+  sfx: [[0.45, 'whoosh', { dur: 1.8 }], [3.05, 'whoosh', { dur: 1.5, pitch: 0.9 }], [4.95, 'cut'], [5.55, 'whoosh', { dur: 1.7 }]],
+  hits: [],
+  mb: 3,
 
   build(stage) {
     const group = new THREE.Group()
     group.visible = false
     stage.scene.add(group)
 
-    // The phone is a quiet backplate here: the subject is what leaves it.
     const set = makeSet()
     group.add(set)
 
-    const phone = makePhone({ height: 1.8 })
+    const height = 1.86
+    const phone = makePhone({ height })
     phone.position.y = -0.10
     group.add(phone)
 
-    const mirror = makeMirror(phone, { floorY: -1.28, opacity: 0.11 })
+    const mirror = makeMirror(phone, { floorY: -1.28, opacity: 0.10 })
     group.add(mirror)
 
-    const rings = [0, 1].map((i) => {
-      const ring = makeSoundRing({ radius: 0.42, width: 0.035, color: i === 0 ? BRAND : ATTENTION })
-      ring.position.copy(phone.position)
-      ring.material.opacity = 0
-      group.add(ring)
-      return ring
+    // Three speakers, three rings. Two layers each: a crisp edge and a wide, dim halo —
+    // one flat ring reads as a drawn circle, two read as light travelling through air.
+    const rings = [ATTENTION, BRAND, ATTENTION].map((color) => {
+      const pair = new THREE.Group()
+      const core = makeSoundRing({ radius: 0.42, width: 0.028, color })
+      const halo = makeSoundRing({ radius: 0.42, width: 0.130, color })
+      core.material.opacity = 0
+      halo.material.opacity = 0
+      pair.add(core, halo)
+      pair.position.copy(phone.position)
+      pair.userData = { core, halo }
+      group.add(pair)
+      return pair
     })
 
-    const bubbles = STEPS.map((text) => {
-      // World-space height ~0.13 units: about 40px on screen at this camera, which matches
-      // the storyboard's minimum for on-screen text.
-      const bubble = makeLabel(text, { px: 40, weight: 500, color: '#F2FBF8', worldHeight: 0.17 })
-      bubble.visible = false
-      group.add(bubble)
-      return bubble
+    // The assistant speaking, as five bars. It appears only while the assistant holds the
+    // turn, and it is the thing that snaps flat at the interruption.
+    const BARS = 5
+    const bars = []
+    for (let i = 0; i < BARS; i++) {
+      const bar = new THREE.Mesh(
+        new THREE.PlaneGeometry(0.028, 1),
+        new THREE.MeshBasicMaterial({
+          color: BRAND, transparent: true, depthWrite: false,
+          blending: THREE.AdditiveBlending, opacity: 0,
+        }),
+      )
+      bar.position.set(0.67 + i * 0.075, 0.30, 0.35)
+      group.add(bar)
+      bars.push(bar)
+    }
+
+    // The steps, as frosted pills on the right. Baked text + chip in one texture, so the
+    // corner radius and the baseline can never disagree.
+    const pills = STEPS.map((text) => {
+      const pill = makePill(text, {
+        px: 40, color: '#EDF8F4', weight: 500,
+        bg: 'rgba(16,25,30,0.74)', border: 'rgba(127,227,200,0.30)',
+        dotColor: '#39C39B', worldHeight: 0.175,
+      })
+      pill.visible = false
+      group.add(pill)
+      return pill
     })
 
-    const subtitle = makeSubtitle({
-      text: '说得进去，也插得进去',
-      sub: '说完自动接、说话时能打断、每一步都念出来',
-      y: -0.80,
-    })
-    subtitle.visible = false
-    setGroupOpacity(subtitle, 0)
-    stage.overlay.add(subtitle)
-
-    group.userData = { phone, rings, bubbles, subtitle, lastPaint: null }
+    group.userData = { set, phone, mirror, rings, bars, pills, lastPaint: null }
     stage.userData.voice = group
   },
 
   enter(stage) {
     const group = stage.userData.voice
     group.visible = true
-    group.userData.subtitle.visible = true
     group.userData.lastPaint = null
     stage.renderer.setClearColor(INK_BG, 1)
+    // Remember the post defaults so the interruption pulse cannot leak into the next shot.
+    group.userData.bloomBase = stage.bloom.strength
+    group.userData.abBase = stage.lens.uniforms.uAberration.value
   },
 
   update(stage, local, t) {
     const group = stage.userData.voice
-    const { phone, rings, bubbles, subtitle } = group.userData
+    const { set, phone, rings, bars, pills } = group.userData
+    const B = BEATS
 
-    // A slow arc: the haze layers slide against each other, which is the only reason the depth
-    // is visible at all.
-    const d = distanceFor(stage, 1.9, 0.70)
-    const a = 0.34 * Math.sin(local * 0.40)
-    stage.camera.position.set(d * Math.sin(a), 0.04 + 0.05 * Math.cos(local * 0.55), d * Math.cos(a))
-    stage.camera.lookAt(0, -0.05, 0)
+    set.userData.update?.(t)
 
-    const lit = smooth01(local, 0, 0.6)
-    if (group.userData.lastPaint !== 'on') {
-      group.userData.lastPaint = 'on'
+    // ---- the interruption pulse: one short optical event, then done.
+    const pop = local >= B.cutAt ? Math.exp(-(local - B.cutAt) * 3.4) : 0
+    stage.bloom.strength = group.userData.bloomBase + 0.28 * pop
+    stage.lens.uniforms.uAberration.value = group.userData.abBase + 0.0075 * pop
+
+    // ---- camera: one calm arc. No handheld layer, no shake on the interruption: the beat
+    // is carried by the ring's collapse, the colour step and a single short optical pulse.
+    const d = 3.53 - 0.20 * ramp(local, 0.6, 6.5, EASE.inOut)
+    const a = 0.028 + 0.19 * Math.sin(local * 0.15)
+    stage.camera.position.set(d * Math.sin(a), 0.015 + 0.035 * Math.cos(local * 0.19), d * Math.cos(a))
+    stage.camera.lookAt(0, -0.02, 0)
+
+    // ---- the phone stays listening: repaint only when the breath would differ.
+    const pulse = 0.5 + 0.5 * Math.sin(t * 1.7)
+    const pq = Math.round(pulse * 20) / 20
+    if (group.userData.lastPaint !== pq) {
+      group.userData.lastPaint = pq
       phone.userData.paint((ctx, w, h) => {
         paintHomeScreen(ctx, w, h, {
-          status: '正在听…',
-          tone: '#C46A14',
-          circle: '我在听',
-          hint: '说完就好',
-          pressed: 1,
+          status: '正在听…', tone: '#C46A14', circle: '我在听', hint: '说完就好',
+          pressed: 1, depth: 0, pulse: pq, wake: 1,
         })
       })
     }
-    phone.userData.surface.material.opacity = 0.15 + 0.85 * lit
-    phone.userData.rim.material.opacity = 0.10 + 0.20 * lit
 
-    // --- ring 1: the person speaks, and it travels outward untouched.
-    const r1 = Math.max(0, local - BEATS.ring1Start)
-    const r1t = Math.min(1, r1 / BEATS.ring1Life)
-    rings[0].visible = r1 > 0 && r1t < 1
-    if (rings[0].visible) {
-      const s = 0.55 + 2.1 * easeOut(r1t)
-      rings[0].scale.set(s, s, 1)
-      rings[0].material.color.setHex(BRAND)
-      rings[0].material.opacity = (1 - r1t) * 0.75
+    // ---- ring 1: the person speaks. Expands, tilts, fades.
+    driveRing(rings[0], local, B.ring1At, B.ring1Life, { grow: 2.55, tilt: 1 })
+    // ---- ring 2: the assistant answers, then is cut off from the inside.
+    driveAssistant(rings[1], local, t, B)
+    // ---- ring 3: the microphone takes over.
+    driveRing(rings[2], local, B.ring3At, B.ring3Life, { grow: 2.30, tilt: -1 })
+
+    // ---- the speaking bars: alive while the assistant holds the turn, flat at the cut.
+    const speaking = local >= B.assistantAt
+    const cut = Math.max(0, local - B.cutAt)
+    const alive = speaking ? Math.max(0, 1 - cut / 0.30) : 0
+    const barColor = new THREE.Color(BRAND).lerp(new THREE.Color(ATTENTION), Math.min(1, cut / 0.25))
+    for (let i = 0; i < bars.length; i++) {
+      const bar = bars[i]
+      bar.material.color.copy(barColor)
+      if (alive <= 0.001) { bar.material.opacity = 0; continue }
+      const wobble = Math.abs(Math.sin(t * 6.1 + i * 1.7)) * 0.6
+        + Math.abs(Math.sin(t * 9.3 + i * 0.9)) * 0.4
+      const hgt = (0.05 + 0.15 * wobble) * alive
+      bar.scale.set(1, hgt, 1)
+      bar.position.y = 0.30 + hgt / 2
+      bar.material.opacity = 0.85 * alive
     }
 
-    // --- ring 2: the assistant starts, and is interrupted from the inside.
-    const r2 = Math.max(0, local - BEATS.ring2Start)
-    const cut = local - BEATS.cutAt
-    rings[1].visible = r2 > 0 && local < BEATS.cutAt + BEATS.ring2Life
-    if (rings[1].visible) {
-      const grow = Math.min(1, r2 / 0.9)
-      const shrink = cut > 0 ? easeOut(Math.min(1, cut / BEATS.ring2Life)) : 0
-      const s = (0.55 + 1.2 * easeOut(grow)) * (1 - 0.72 * shrink)
-      rings[1].scale.set(s, s, 1)
-      // Colour steps to attention at the cut: the interruption is the moment the
-      // microphone takes over, which is the same signal the real UI uses.
-      const mix = cut > 0 ? Math.min(1, cut / 0.25) : 0
-      rings[1].material.color.setHex(BRAND).lerp(new THREE.Color(ATTENTION), mix)
-      rings[1].material.opacity = (cut > 0 ? (1 - shrink) : 0.75) * 0.8
+    // ---- the steps. Newest at full strength; the earlier ones step back.
+    const revealed = local >= B.stepAt
+      ? Math.min(pills.length, 1 + Math.floor((local - B.stepAt) / B.stepStagger))
+      : 0
+    const current = revealed - 1
+    for (let i = 0; i < pills.length; i++) {
+      const pill = pills[i]
+      if (i >= revealed) { pill.visible = false; continue }
+      const k = ramp(local, B.stepAt + i * B.stepStagger, B.stepDur, EASE.out)
+      pill.visible = k > 0.001
+      const baseY = 0.34 - i * 0.30
+      pill.position.set(0.86 + (1 - k) * 0.16, baseY + (1 - k) * 0.10, 0.42)
+      const dim = i === current ? 1 : 0.52
+      pill.material.opacity = k * dim
+      // makePill already put the world size in the geometry, so this is a unit scale.
+      const sc = 0.97 + 0.03 * k
+      pill.scale.set(sc, sc, 1)
     }
 
-    // --- the steps, rising one at a time. Not one conclusion: every step, in order.
-    bubbles.forEach((bubble, i) => {
-      const at = BEATS.bubbleStart + i * BEATS.bubbleStagger
-      const life = Math.max(0, local - at)
-      const alive = local >= at && life < BEATS.bubbleLife
-      bubble.visible = alive
-      if (!alive) return
-      const k = life / BEATS.bubbleLife
-      const rise = easeOut(k)
-      // Right of the phone, stacked upward, clear of both the device and the subtitle band.
-      bubble.position.set(1.16 - 0.14 * rise, 0.62 - i * 0.40 + 0.18 * (1 - rise), 0.4)
-      const fade = k < 0.18 ? k / 0.18 : 1 - Math.max(0, (k - 0.65) / 0.35)
-      setGroupOpacity(bubble, Math.max(0, fade))
-      bubble.quaternion.copy(stage.camera.quaternion)
-    })
-
-    const subIn = smooth01(local, BEATS.subtitleIn, BEATS.subtitleInDur)
-    setGroupOpacity(subtitle, subIn)
   },
 
   teardown(stage) {
     const group = stage.userData.voice
     if (group) group.visible = false
-    stage.overlay.remove(stage.userData.voice.userData.subtitle)
+    // Never let the pulse's post values survive into the next shot.
+    if (stage.bloom) stage.bloom.strength = group?.userData?.bloomBase ?? stage.bloom.strength
+    if (stage.lens) stage.lens.uniforms.uAberration.value = group?.userData?.abBase ?? stage.lens.uniforms.uAberration.value
   },
 })
+
+/** A ring that simply expands and fades. The whisper of asymmetry stops it reading as a circle. */
+function driveRing(ring, local, at, life, { grow = 2.4, tilt = 1 } = {}) {
+  const age = local - at
+  const alive = age >= 0 && age < life
+  ring.visible = alive
+  if (!alive) return
+  const k = age / life
+  const s = 0.5 + grow * EASE.out(k)
+  ring.scale.set(s, s * (1 + 0.06 * Math.sin(age * 2.1)), 1)
+  ring.rotation.z = tilt * (0.25 * Math.sin(age * 1.3)) + k * tilt * 0.20
+  const fade = 1 - k
+  ring.userData.core.material.opacity = fade * 0.80
+  ring.userData.halo.material.opacity = fade * 0.24
+}
+
+/**
+ * The assistant's ring: it grows like the others, then at the cut it collapses from the
+ * *inside* (scale pulled down rather than faded out), reverses its rotation and steps
+ * brand -> attention. That reversal is the idea; a plain fade would read as the assistant
+ * finishing its sentence.
+ */
+function driveAssistant(ring, local, t, B) {
+  const age = local - B.assistantAt
+  const cut = local - B.cutAt
+  const alive = age >= 0 && cut < B.cutLife
+  ring.visible = alive
+  if (!alive) return
+  const grow = Math.min(1, age / B.assistantGrow)
+  // The collapse is what the beat means: the ring is pulled in from the inside fast, on an
+  // accelerating curve, while the colour change runs slower underneath it.
+  const shrink = cut > 0 ? EASE.in(Math.min(1, cut / 0.26)) : 0
+  const s = (0.5 + 1.35 * EASE.out(grow)) * (1 - 0.85 * shrink)
+  ring.scale.set(s, s * (1 + 0.05 * Math.sin(age * 2.0)), 1)
+  ring.rotation.z = 0.25 * Math.sin(age * 1.2) - 0.9 * Math.min(1, Math.max(0, cut) / B.cutLife)
+  const mix = cut > 0 ? Math.min(1, cut / 0.22) : 0
+  const col = new THREE.Color(BRAND).lerp(new THREE.Color(ATTENTION), mix)
+  ring.userData.core.material.color.copy(col)
+  ring.userData.halo.material.color.copy(col)
+  const fade = cut > 0 ? Math.max(0, 1 - cut / B.cutLife) : 1
+  ring.userData.core.material.opacity = fade * 0.85
+  ring.userData.halo.material.opacity = fade * 0.26
+}

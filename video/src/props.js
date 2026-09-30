@@ -42,34 +42,49 @@ export const SCREEN_H = 1400
  * rounded edge reads as a black smear, while a flat plate with a baked rounded outline and
  * a rim glow reads as a device and keeps the screen the brightest thing in frame.
  */
-export function makePhone({ height = 2.0 } = {}) {
+export function makePhone({ height = 2.0, corner = null } = {}) {
   const width = height * DEVICE_ASPECT
   const group = new THREE.Group()
 
-  const bodyTex = makeTextTexture({ text: ' ', size: 8, padding: 2 })
-  const canvas = document.createElement('canvas')
-  canvas.width = 256
-  canvas.height = 512
-  const ctx = canvas.getContext('2d')
-  roundRect(ctx, 6, 6, canvas.width - 12, canvas.height - 12, 34)
-  ctx.fillStyle = '#0b1114'
-  ctx.fill()
-  ctx.lineWidth = 3
-  ctx.strokeStyle = 'rgba(150,190,185,0.30)'
-  ctx.stroke()
-  const bodyMap = new THREE.CanvasTexture(canvas)
-  bodyMap.colorSpace = THREE.SRGBColorSpace
-  bodyTex.dispose()
+  // ---- the slab: a real rounded-rect prism with a chamfered edge ----
+  //
+  // It used to be two flat planes (a body plate and a screen plate). At this camera distance
+  // a flat plate can only ever be a picture of a phone: no thickness to catch a highlight, no
+  // chamfer to draw a line down the side, nothing for the key light to do. So the body is an
+  // extruded rounded rectangle with a 0.6 mm bevel, in brushed dark metal.
+  const T = 0.052                     // body thickness, world units
+  const bevel = 0.006
+  const r = corner ?? width * 0.150   // corner radius
+  const outline = roundedRectShape(width - bevel * 2, height - bevel * 2, Math.max(0.02, r - bevel))
+  const frameGeo = new THREE.ExtrudeGeometry(outline, {
+    depth: Math.max(0.004, T - bevel * 2),
+    bevelEnabled: true,
+    bevelThickness: bevel,
+    bevelSize: bevel,
+    bevelSegments: 2,
+    curveSegments: 24,
+  })
+  frameGeo.center()
+  const frameMat = new THREE.MeshStandardMaterial({
+    color: 0x2C3237, metalness: 0.92, roughness: 0.30,
+  })
+  frameMat.transparent = true
+  const frame = new THREE.Mesh(frameGeo, frameMat)
+  group.add(frame)
 
-  const bodyMat = new THREE.MeshBasicMaterial({ map: bodyMap, transparent: true, depthWrite: false })
-  // UI plates are authored in sRGB and must reach the screen unchanged. ACES filmic tone
-  // mapping (right for the glow layers, which should bloom into white) turned the phone's
-  // white screen into a grey rectangle and the subtitles into faint smudges.
-  bodyMat.toneMapped = false
-  const body = new THREE.Mesh(new THREE.PlaneGeometry(width * 1.075, height * 1.03), bodyMat)
-  group.add(body)
+  // ---- the glass: a rounded-rect face, glossy, with a clearcoat ----
+  const glassGeo = new THREE.ShapeGeometry(
+    roundedRectShape(width - 0.016, height - 0.016, Math.max(0.02, r - 0.008)), 24)
+  const glassMat = new THREE.MeshPhysicalMaterial({
+    color: 0x0A0E12, metalness: 0.0, roughness: 0.045,
+    clearcoat: 1.0, clearcoatRoughness: 0.03,
+  })
+  glassMat.transparent = true
+  const glass = new THREE.Mesh(glassGeo, glassMat)
+  glass.position.z = T / 2 + 0.0008
+  group.add(glass)
 
-  // The screen: its own canvas, redrawn by whichever shot owns it.
+  // ---- the screen: the baked UI canvas, on the interface layer ----
   const screen = document.createElement('canvas')
   screen.width = SCREEN_W
   screen.height = SCREEN_H
@@ -80,42 +95,128 @@ export function makePhone({ height = 2.0 } = {}) {
 
   const surfaceMat = new THREE.MeshBasicMaterial({ map: screenMap, transparent: true, depthWrite: false })
   surfaceMat.toneMapped = false
-  const surface = new THREE.Mesh(new THREE.PlaneGeometry(width, height), surfaceMat)
-  // Layer 1: interface. See Stage.renderAt — the screen must not go through bloom.
-  surface.layers.set(LAYER_UI)
-  surface.position.z = 0.001
+  const screenW = width * 0.955
+  const screenH = height * 0.972
+  const surface = new THREE.Mesh(new THREE.PlaneGeometry(screenW, screenH), surfaceMat)
+  surface.layers.set(LAYER_UI)   // interface: after post, unbloomed, exact colours
+  surface.position.z = T / 2 + 0.0022
   group.add(surface)
 
-  // Rim glow: the phone should sit in its own light rather than in the void.
+  // ---- the glass reflection: additive, on the interface layer, drawn over the screen ----
+  //
+  // It was on the world layer and therefore *behind* the screen, which is drawn after post —
+  // so the reflection never appeared. A phone screen with no reflection on it is the single
+  // biggest reason the device read as a sticker.
+  const sheenCanvas = document.createElement('canvas')
+  sheenCanvas.width = 64
+  sheenCanvas.height = 128
+  const sctx = sheenCanvas.getContext('2d')
+  const sgrd = sctx.createLinearGradient(0, 0, 64, 128)
+  sgrd.addColorStop(0.00, 'rgba(255,255,255,0.20)')
+  sgrd.addColorStop(0.30, 'rgba(255,255,255,0.05)')
+  sgrd.addColorStop(0.55, 'rgba(255,255,255,0.00)')
+  sgrd.addColorStop(0.80, 'rgba(255,255,255,0.035)')
+  sgrd.addColorStop(1.00, 'rgba(255,255,255,0.10)')
+  sctx.fillStyle = sgrd
+  sctx.fillRect(0, 0, 64, 128)
+  const sheenMap = new THREE.CanvasTexture(sheenCanvas)
+  sheenMap.colorSpace = THREE.SRGBColorSpace
+  const sheenMat = new THREE.MeshBasicMaterial({
+    map: sheenMap, transparent: true, depthWrite: false,
+    blending: THREE.AdditiveBlending, opacity: 0.55,
+  })
+  sheenMat.toneMapped = false
+  const sheen = new THREE.Mesh(new THREE.PlaneGeometry(screenW, screenH), sheenMat)
+  sheen.layers.set(LAYER_UI)
+  sheen.renderOrder = 4
+  sheen.position.z = T / 2 + 0.0030
+  group.add(sheen)
+
+  // ---- punch-hole camera, and the side buttons ----
+  const punchMat = new THREE.MeshBasicMaterial({ color: 0x05070A })
+  punchMat.toneMapped = false
+  const punch = new THREE.Mesh(new THREE.CircleGeometry(0.017, 24), punchMat)
+  punch.layers.set(LAYER_UI)
+  punch.renderOrder = 5
+  punch.position.set(0, height * 0.452, T / 2 + 0.0034)
+  group.add(punch)
+
+  const buttonMat = new THREE.MeshStandardMaterial({ color: 0x3A4147, metalness: 0.95, roughness: 0.25 })
+  buttonMat.transparent = true
+  const buttons = new THREE.Group()
+  for (const [y, h] of [[0.42, 0.055], [0.30, 0.11]]) {
+    const b = new THREE.Mesh(new THREE.BoxGeometry(0.007, h * height * 0.5, 0.020), buttonMat)
+    b.position.set(width / 2 + 0.0022, y * height * 0.5, 0)
+    buttons.add(b)
+  }
+  group.add(buttons)
+
+  // ---- rim light: a tight glow behind the device ----
   const rim = new THREE.Mesh(
-    new THREE.PlaneGeometry(width * 2.4, height * 1.9),
+    new THREE.PlaneGeometry(width * 1.45, height * 1.22),
     new THREE.MeshBasicMaterial({
-      map: glowTexture(),
-      transparent: true,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
-      color: BRAND,
-      opacity: 0.20,
+      map: glowTexture(), transparent: true, depthWrite: false,
+      blending: THREE.AdditiveBlending, color: BRAND, opacity: 0.07,
     }),
   )
-  rim.position.z = -0.02
+  rim.position.z = -T / 2 - 0.006
   group.add(rim)
 
   group.userData = {
     width,
     height,
-    body,
+    body: frame,
+    glass,
     surface,
+    sheen,
     rim,
+    punch,
+    buttons,
     screenCtx,
     screenMap,
-    /** Redraw the screen canvas and flag the texture; call from update(), not build(). */
+    /** Fade the physical device (frame, glass, buttons, punch-hole) as one thing. */
+    setFrameOpacity(k) {
+      frameMat.opacity = k
+      glassMat.opacity = k
+      buttonMat.opacity = k
+      punchMat.opacity = k
+    },
+    /**
+     * Redraw the screen canvas and flag the texture; call from update(), not build().
+     *
+     * The clip is the important part: painting the UI into a square-cornered rectangle put a
+     * rectangular image inside a rounded phone. Every paint is clipped to the device's own
+     * corner radius, so the two can never disagree.
+     */
     paint(draw) {
+      screenCtx.clearRect(0, 0, SCREEN_W, SCREEN_H)
+      screenCtx.save()
+      roundRect(screenCtx, 0, 0, SCREEN_W, SCREEN_H, SCREEN_W * (r / (width * 0.955)))
+      screenCtx.clip()
       draw(screenCtx, SCREEN_W, SCREEN_H)
+      screenCtx.restore()
       screenMap.needsUpdate = true
     },
   }
   return group
+}
+
+/** A rounded-rectangle THREE.Shape, centred on the origin, in the XY plane. */
+export function roundedRectShape(w, h, r) {
+  const s = new THREE.Shape()
+  const x = -w / 2
+  const y = -h / 2
+  const rr = Math.min(r, w / 2, h / 2)
+  s.moveTo(x + rr, y)
+  s.lineTo(x + w - rr, y)
+  s.quadraticCurveTo(x + w, y, x + w, y + rr)
+  s.lineTo(x + w, y + h - rr)
+  s.quadraticCurveTo(x + w, y + h, x + w - rr, y + h)
+  s.lineTo(x + rr, y + h)
+  s.quadraticCurveTo(x, y + h, x, y + h - rr)
+  s.lineTo(x, y + rr)
+  s.quadraticCurveTo(x, y, x + rr, y)
+  return s
 }
 
 /** A soft radial glow, used for halos, rim light and hit flashes. */
@@ -161,6 +262,46 @@ export function bandTexture() {
   ctx.fillRect(0, 0, w, h)
   const tex = new THREE.CanvasTexture(canvas)
   tex.colorSpace = THREE.SRGBColorSpace
+  return tex
+}
+
+/**
+ * A technical grid: thin lines on transparent, with a radial fade so it never shows an edge.
+ * Used for the back wall and the ground so the set has structure instead of being a void.
+ */
+export function gridTexture({ size = 512, cells = 16, color = '150,190,205', line = 1, vignette = 0.75 } = {}) {
+  const c = document.createElement('canvas')
+  c.width = c.height = size
+  const ctx = c.getContext('2d')
+  const step = size / cells
+  ctx.strokeStyle = `rgba(${color},0.85)`
+  ctx.lineWidth = line
+  ctx.beginPath()
+  for (let i = 0; i <= cells; i++) {
+    const p = Math.round(i * step) + 0.5
+    ctx.moveTo(p, 0); ctx.lineTo(p, size)
+    ctx.moveTo(0, p); ctx.lineTo(size, p)
+  }
+  ctx.stroke()
+  // every 4th line a little brighter, so the grid has a rhythm instead of being uniform
+  ctx.strokeStyle = `rgba(${color},1.0)`
+  ctx.beginPath()
+  for (let i = 0; i <= cells; i += 4) {
+    const p = Math.round(i * step) + 0.5
+    ctx.moveTo(p, 0); ctx.lineTo(p, size)
+    ctx.moveTo(0, p); ctx.lineTo(size, p)
+  }
+  ctx.stroke()
+  const g = ctx.createRadialGradient(size / 2, size / 2, size * 0.05, size / 2, size / 2, size * 0.5)
+  g.addColorStop(0, 'rgba(0,0,0,0)')
+  g.addColorStop(vignette, 'rgba(0,0,0,0.55)')
+  g.addColorStop(1, 'rgba(0,0,0,1)')
+  ctx.globalCompositeOperation = 'destination-out'
+  ctx.fillStyle = g
+  ctx.fillRect(0, 0, size, size)
+  const tex = new THREE.CanvasTexture(c)
+  tex.colorSpace = THREE.SRGBColorSpace
+  tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping
   return tex
 }
 
@@ -246,17 +387,21 @@ export function camKey(t, keys) {
  * The overlay camera is 2 units tall for the whole frame, so 1 px = 2/1080 units. For text
  * that lives in the 3D scene, pass `worldHeight` instead.
  */
-export function makeLabel(text, { px = 40, color = '#FFFFFF', weight = 500, worldHeight = null, align = 'center' } = {}) {
-  const tex = makeTextTexture({ text, size: px, weight, color, align })
+export function makeLabel(text, { px = 40, color = '#FFFFFF', weight = 500, worldHeight = null, align = 'center', layer = LAYER_UI, family = undefined, italic = false, letterSpacing = 0, shadowColor = null, shadowBlur = 0 } = {}) {
+  const tex = makeTextTexture({ text, size: px, weight, color, align, family, italic, letterSpacing, shadowColor, shadowBlur })
   const labelMat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false })
   labelMat.toneMapped = false
-  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1 / tex.userData.aspect), labelMat)
-  mesh.layers.set(LAYER_UI)
-  // userData.height is the plate height in CSS px (text + padding), so this maps the
-  // measured plate onto the frame at exactly the requested scale.
+  // The plate carries its world size in the geometry, and the mesh is never rescaled after
+  // this. The previous version built a PlaneGeometry(1, 1/aspect) — which already has the
+  // texture's aspect — and then scaled it by (widthUnits, heightUnits): a non-uniform scale
+  // that divided the height by the aspect a second time. Every label in the film was
+  // squashed vertically (the Chinese subtitle measured 16 px tall instead of 42).
   const heightUnits = worldHeight ?? (tex.userData.height * (2 / 1080))
   const widthUnits = heightUnits * tex.userData.aspect
-  mesh.scale.set(widthUnits, heightUnits, 1)
+  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(widthUnits, heightUnits), labelMat)
+  // Overlay subtitles ask for layer 0 (the orthographic camera's own layer); in-scene
+  // labels stay on the UI layer so they render after post, crisp and unbloomed.
+  mesh.layers.set(layer)
   mesh.userData.baseScale = widthUnits
   mesh.userData.heightUnits = heightUnits
   return mesh
@@ -310,16 +455,21 @@ export function makeSoundRing({ radius = 0.5, width = 0.05, color = BRAND } = {}
  */
 export function makeSubtitle({ text, sub = null, y = -0.74 }) {
   const group = new THREE.Group()
-  const main = makeLabel(text, { px: 56, weight: 600, color: '#FFFFFF' })
+  // Layer 0: these live on the overlay scene, whose camera sees that layer. (They were
+  // authored on LAYER_UI, which the overlay camera never looks at.)
+  const main = makeLabel(text, { px: 56, weight: 600, color: '#FFFFFF', layer: 0 })
   group.add(main)
   group.userData.main = main
   if (sub) {
-    const s = makeLabel(sub, { px: 30, weight: 400, color: TEXT_DIM })
+    const s = makeLabel(sub, { px: 30, weight: 400, color: TEXT_DIM, layer: 0 })
+    // The secondary line sits a fixed 0.125 units below the main one; the shots animate the
+    // group, never this offset, so the two lines can never collide.
     s.position.y = -0.125
     group.add(s)
     group.userData.sub = s
   }
   group.position.set(0, y, 0)
+  group.userData.baseY = y
   return group
 }
 
@@ -351,64 +501,157 @@ export function paintHomeScreen(ctx, w, h, {
   status = '我在',
   tone = '#1E8449',
   circle = '说给接线员听',
-  circleColor = '#1A7F6B',
   hint = '点一下开始说话',
   pressed = 0,
+  depth = null,
+  pulse = 0,
+  wake = 1,
 } = {}) {
+  // `wake` is the screen turning on: elements arrive in reading order, not as one flash.
+  const at = (start, dur) => smooth01(wake, start, dur)
+
   ctx.clearRect(0, 0, w, h)
-  ctx.fillStyle = '#F6F7F8'
+
+  // A screen is never one value. A top-lit gradient plus a slight edge falloff is what
+  // stops the panel reading as a sheet of paper.
+  const face = ctx.createLinearGradient(0, 0, 0, h)
+  face.addColorStop(0.00, '#FBFCFD')
+  face.addColorStop(0.45, '#F5F7F9')
+  face.addColorStop(1.00, '#E9EDF1')
+  ctx.fillStyle = face
+  ctx.fillRect(0, 0, w, h)
+  const edge = ctx.createRadialGradient(w / 2, h * 0.42, w * 0.25, w / 2, h * 0.42, w * 1.05)
+  edge.addColorStop(0, 'rgba(0,0,0,0)')
+  edge.addColorStop(1, 'rgba(18,28,33,0.06)')
+  ctx.fillStyle = edge
   ctx.fillRect(0, 0, w, h)
 
   const pad = w * 0.075
+  const cx = w / 2
+  const cy = h * 0.42
+  const r = w * 0.29
+  const d = depth ?? Math.max(0, pressed)
+  const rr = r * (1 - 0.055 * Math.max(-0.22, d))
 
-  // status line
+  // ---- status line: the smallest element arrives first.
+  ctx.save()
+  ctx.globalAlpha = at(0.00, 0.30)
   ctx.beginPath()
   ctx.arc(pad + 9, h * 0.075, 9, 0, Math.PI * 2)
   ctx.fillStyle = tone
   ctx.fill()
   ctx.fillStyle = '#17202A'
-  ctx.font = `600 ${Math.round(w * 0.085)}px "Noto Sans CJK SC", sans-serif`
+  ctx.textAlign = 'left'
   ctx.textBaseline = 'middle'
+  ctx.font = `600 ${Math.round(w * 0.082)}px "Noto Sans CJK SC", "Microsoft YaHei", sans-serif`
   ctx.fillText(status, pad + 28, h * 0.076)
+  ctx.restore()
 
-  // the big circle
-  const cx = w / 2
-  const cy = h * 0.42
-  const r = w * 0.30
+  // ---- the one thing to press.
+  ctx.save()
+  ctx.globalAlpha = at(0.12, 0.42)
+
+  // A listening halo that breathes; slower than a UI blink, so it reads as calm attention.
+  if (pulse > 0) {
+    ctx.beginPath()
+    ctx.arc(cx, cy, rr * (1.09 + 0.13 * pulse), 0, Math.PI * 2)
+    ctx.fillStyle = `rgba(196,106,20,${0.07 + 0.13 * pulse})`
+    ctx.fill()
+  }
+
+  // Contact shadow first, so the disc sits on the glass instead of floating above it.
+  ctx.save()
+  ctx.shadowColor = 'rgba(12,28,24,0.30)'
+  ctx.shadowBlur = r * 0.42
+  ctx.shadowOffsetY = r * 0.13
+  const g = ctx.createRadialGradient(cx - rr * 0.34, cy - rr * 0.48, rr * 0.05, cx, cy, rr * 1.30)
+  g.addColorStop(0.00, mixHex('#3FC0A2', '#F0A047', pressed))
+  g.addColorStop(0.48, mixHex('#1A7F6B', '#C46A14', pressed))
+  g.addColorStop(1.00, mixHex('#0E5849', '#9C520C', pressed))
   ctx.beginPath()
-  ctx.arc(cx, cy, r, 0, Math.PI * 2)
-  ctx.fillStyle = mixHex('#1A7F6B', '#C46A14', pressed)
+  ctx.arc(cx, cy, rr, 0, Math.PI * 2)
+  ctx.fillStyle = g
+  ctx.fill()
+  ctx.restore()
+
+  // Specular sheen across the top third: the single cue that says "glass".
+  ctx.beginPath()
+  ctx.ellipse(cx, cy - rr * 0.44, rr * 0.74, rr * 0.30, 0, 0, Math.PI * 2)
+  ctx.fillStyle = 'rgba(255,255,255,0.13)'
   ctx.fill()
 
-  ctx.fillStyle = 'rgba(255,255,255,0.97)'
-  ctx.font = `500 ${Math.round(w * 0.115)}px "Noto Sans CJK SC", sans-serif`
+  drawMic(ctx, cx, cy - rr * 0.33, r * 0.40, 'rgba(255,255,255,0.97)')
+
+  // The caption is the longest string on the screen ("说给接线员听"), so it is fitted to
+  // the disc instead of overflowing it. The real app wraps it at 21sp; on film we want the
+  // largest size that still fits, because the phone is the smallest type in the frame.
+  ctx.fillStyle = 'rgba(255,255,255,0.98)'
   ctx.textAlign = 'center'
-  ctx.fillText(circle, cx, cy + r * 0.02)
-  ctx.font = `400 ${Math.round(w * 0.085)}px "Noto Sans CJK SC", sans-serif`
-  ctx.fillText('🎤', cx, cy - r * 0.34)
+  ctx.textBaseline = 'middle'
+  const capPx = fitFont(ctx, circle, rr * 1.52, w * 0.098, 500)
+  ctx.font = `500 ${capPx}px "Noto Sans CJK SC", "Microsoft YaHei", sans-serif`
+  ctx.fillText(circle, cx, cy + rr * 0.34)
+  ctx.restore()
+
+  // ---- the hint under the button.
+  ctx.save()
+  ctx.globalAlpha = at(0.44, 0.40)
+  ctx.fillStyle = '#5D6D7E'
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+  ctx.font = `400 ${Math.round(w * 0.058)}px "Noto Sans CJK SC", "Microsoft YaHei", sans-serif`
+  ctx.fillText(hint, cx, cy + rr + h * 0.050)
+  ctx.restore()
+
+  // ---- the quiet row of safety affordances at the bottom.
+  // Laid out by measured width: "请家人帮忙" and "给家人打电话" are 5 and 6 glyphs, so
+  // equal slots ran them into each other.
+  ctx.save()
+  ctx.globalAlpha = at(0.56, 0.40)
+  ctx.fillStyle = '#7C8B98'
   ctx.textAlign = 'left'
-
-  // hint under the circle
-  ctx.fillStyle = '#5D6D7E'
-  ctx.font = `400 ${Math.round(w * 0.062)}px "Noto Sans CJK SC", sans-serif`
-  ctx.textAlign = 'center'
-  ctx.fillText(hint, cx, cy + r + h * 0.045)
-
-  // the quiet row of safety buttons at the bottom.
-  // Laid out by measured width, not by evenly spaced guesses: "请家人帮忙" and
-  // "给家人打电话" are 5 and 6 glyphs, so equal spacing ran them into each other.
-  ctx.fillStyle = '#5D6D7E'
-  ctx.font = `400 ${Math.round(w * 0.046)}px "Noto Sans CJK SC", sans-serif`
+  ctx.textBaseline = 'middle'
+  ctx.font = `400 ${Math.round(w * 0.046)}px "Noto Sans CJK SC", "Microsoft YaHei", sans-serif`
   const labels = ['打字', '请家人帮忙', '给家人打电话']
   const slots = [0.17, 0.50, 0.83]
   labels.forEach((label, i) => {
     const x = w * slots[i]
     const half = ctx.measureText(label).width / 2
-    // Nudge the outer two inward if they would leave the safe area.
     const clamped = Math.max(half + pad * 0.5, Math.min(w - half - pad * 0.5, x))
     ctx.fillText(label, clamped, h * 0.955)
   })
-  ctx.textAlign = 'left'
+  ctx.restore()
+}
+
+/** Largest font size (up to `startPx`) at which `text` fits `maxWidth`. */
+function fitFont(ctx, text, maxWidth, startPx, weight = 500) {
+  let px = startPx
+  const family = '"Noto Sans CJK SC", "Microsoft YaHei", sans-serif'
+  while (px > 12) {
+    ctx.font = `${weight} ${Math.round(px)}px ${family}`
+    if (ctx.measureText(text).width <= maxWidth) break
+    px *= 0.95
+  }
+  return Math.round(px)
+}
+
+/** A minimal microphone glyph, drawn as paths so it never depends on an emoji font. */
+function drawMic(ctx, cx, cy, s, color) {
+  ctx.save()
+  ctx.strokeStyle = color
+  ctx.fillStyle = color
+  ctx.lineCap = 'round'
+  ctx.lineWidth = s * 0.15
+  roundRect(ctx, cx - s * 0.24, cy - s * 0.58, s * 0.48, s * 0.80, s * 0.24)
+  ctx.fill()
+  ctx.beginPath()
+  ctx.arc(cx, cy - s * 0.06, s * 0.46, Math.PI * 0.12, Math.PI * 0.88)
+  ctx.stroke()
+  ctx.beginPath()
+  ctx.moveTo(cx, cy + s * 0.44)
+  ctx.lineTo(cx, cy + s * 0.74)
+  ctx.stroke()
+  ctx.restore()
 }
 
 export function mixHex(a, b, t) {
@@ -456,20 +699,22 @@ export function makeSet({ tint = BRAND, floorY = -1.28 } = {}) {
     new THREE.PlaneGeometry(9.5, 1.5),
     new THREE.MeshBasicMaterial({
       map: bandTexture(), transparent: true, depthWrite: false,
-      blending: THREE.AdditiveBlending, color: tint, opacity: 0.26,
+      blending: THREE.AdditiveBlending, color: tint, opacity: 0.17,
     }),
   )
-  horizon.position.set(0, -0.62, -2.4)
+  horizon.renderOrder = -8
+  horizon.position.set(0, -0.80, -2.4)
   group.add(horizon)
 
   const horizonWide = new THREE.Mesh(
     new THREE.PlaneGeometry(16, 0.5),
     new THREE.MeshBasicMaterial({
       map: bandTexture(), transparent: true, depthWrite: false,
-      blending: THREE.AdditiveBlending, color: 0x2E5F7A, opacity: 0.13,
+      blending: THREE.AdditiveBlending, color: 0x2E5F7A, opacity: 0.09,
     }),
   )
-  horizonWide.position.set(0, -1.02, -3.6)
+  horizonWide.renderOrder = -8
+  horizonWide.position.set(0, -1.06, -3.6)
   group.add(horizonWide)
 
   // Floor: a gradient that is darkest under the phone, so the eye goes to the screen.
@@ -488,10 +733,22 @@ export function makeSet({ tint = BRAND, floorY = -1.28 } = {}) {
   fctx.fillRect(0, 0, 512, 256)
   const floorMap = new THREE.CanvasTexture(floorCanvas)
   floorMap.colorSpace = THREE.SRGBColorSpace
-  const floor = new THREE.Mesh(
-    new THREE.PlaneGeometry(40, 26),
-    new THREE.MeshBasicMaterial({ map: floorMap }),
-  )
+  // The floor is transparent + a negative renderOrder so it is guaranteed to be drawn
+  // before any subject. As an ordinary opaque mesh it came *after* the additive particle
+  // fields in three's render order and painted over them: the lower half of shot 2's
+  // spark field was hidden at the cut. (Diagnosed by toggling colorWrite — the pixels came
+  // straight back, which ruled out depth culling.)
+  const floorMat = new THREE.MeshBasicMaterial({ map: floorMap, blending: THREE.AdditiveBlending })
+  floorMat.transparent = true
+  floorMat.depthWrite = false
+  // Additive on purpose. Every other combination was tried: as an opaque (or merely
+  // transparent) surface the floor painted over the additive particle field behind it —
+  // shot 2's hand-off lost the lower half of its sparks (1.83M -> 1.04M bright pixels at
+  // the cut). Additive geometry cannot hide anything, and the floor's gradient is a near
+  // black wash anyway, so it reads the same.
+  floorMat.depthTest = false
+  const floor = new THREE.Mesh(new THREE.PlaneGeometry(40, 26), floorMat)
+  floor.renderOrder = -10
   floor.rotation.x = -Math.PI / 2
   floor.position.y = floorY
   group.add(floor)
@@ -505,10 +762,132 @@ export function makeSet({ tint = BRAND, floorY = -1.28 } = {}) {
       blending: THREE.AdditiveBlending, color: tint, opacity: 0.04,
     }),
   )
+  spill.renderOrder = -7
   spill.position.set(0, floorY + 0.75, 0.9)
   group.add(spill)
 
-  group.userData = { haze: [horizon, horizonWide], floor, spill }
+  // Dust. This is the single cheapest thing that makes an empty frame read as a *place*:
+  // a few hundred motes catching the light, drifting slowly. Shot 1 has 36k particles in flight;
+  // shots 2-3 had nothing moving except the subject, which is why they felt like mockups.
+  const DUST = 1500
+  const dpos = new Float32Array(DUST * 3)
+  const dseed = new Float32Array(DUST)
+  const rnd = mulberry32(4242)
+  for (let i = 0; i < DUST; i++) {
+    dpos[i * 3 + 0] = (rnd() - 0.5) * 7.0
+    dpos[i * 3 + 1] = -1.2 + rnd() * 3.4
+    dpos[i * 3 + 2] = -3.6 + rnd() * 5.4
+    dseed[i] = rnd()
+  }
+  const dgeo = new THREE.BufferGeometry()
+  dgeo.setAttribute('position', new THREE.BufferAttribute(dpos, 3))
+  dgeo.setAttribute('aSeed', new THREE.BufferAttribute(dseed, 1))
+  const dust = new THREE.Points(dgeo, new THREE.ShaderMaterial({
+    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+    uniforms: { uTime: { value: 0 }, uColor: { value: new THREE.Color(0x9FD8C8) } },
+    vertexShader: /* glsl */`
+      attribute float aSeed;
+      uniform float uTime;
+      varying float vFade;
+      void main() {
+        vec3 p = position;
+        // Slow, incommensurate drifts: never repeats visibly, never needs a random number.
+        p.x += 0.22 * sin(uTime * 0.16 + aSeed * 31.0);
+        p.y += 0.30 * sin(uTime * 0.11 + aSeed * 17.0);
+        p.z += 0.20 * sin(uTime * 0.09 + aSeed * 47.0);
+        vec4 mv = modelViewMatrix * vec4(p, 1.0);
+        gl_Position = projectionMatrix * mv;
+        gl_PointSize = (1.0 + aSeed * 1.6) * (5.0 / -mv.z);
+        vFade = 0.35 + 0.65 * aSeed;
+      }
+    `,
+    fragmentShader: /* glsl */`
+      uniform vec3 uColor;
+      varying float vFade;
+      void main() {
+        float d = length(gl_PointCoord - 0.5) * 2.0;
+        float a = (1.0 - smoothstep(0.0, 1.0, d)) * 0.5 * vFade;
+        if (a < 0.004) discard;
+        gl_FragColor = vec4(uColor, a);
+      }
+    `,
+  }))
+  group.add(dust)
+
+  // Back wall: a faint technical grid far behind everything. It is what stops the frame
+  // reading as "an object floating in a void" — there is now a room, and the phone sits in it.
+  const wall = new THREE.Mesh(
+    new THREE.PlaneGeometry(26, 15),
+    new THREE.MeshBasicMaterial({
+      map: gridTexture({ cells: 18, color: '150,195,215', line: 2, vignette: 0.62 }),
+      transparent: true, depthWrite: false,
+      blending: THREE.AdditiveBlending, color: 0x3C5F73, opacity: 0.85,
+    }),
+  )
+  wall.position.set(0, 0.55, -7.4)
+  wall.renderOrder = -12
+  group.add(wall)
+
+  // A second, closer wall layer, dimmer and larger: two grids at different depths give the
+  // camera move somewhere to move *through*.
+  const wallNear = new THREE.Mesh(
+    new THREE.PlaneGeometry(20, 12),
+    new THREE.MeshBasicMaterial({
+      map: gridTexture({ cells: 9, color: '130,180,200', line: 2, vignette: 0.7 }),
+      transparent: true, depthWrite: false,
+      blending: THREE.AdditiveBlending, color: 0x2A4A5A, opacity: 0.55,
+    }),
+  )
+  wallNear.position.set(0, 0.25, -5.2)
+  wallNear.renderOrder = -11
+  group.add(wallNear)
+
+  // Ground grid: the same idea laid flat, fading with distance. It gives the floor a scale.
+  const ground = new THREE.Mesh(
+    new THREE.PlaneGeometry(44, 30),
+    new THREE.MeshBasicMaterial({
+      map: gridTexture({ cells: 22, color: '120,170,195', line: 2, vignette: 0.5 }),
+      transparent: true, depthWrite: false,
+      blending: THREE.AdditiveBlending, color: 0x2E5566, opacity: 0.42,
+    }),
+  )
+  ground.rotation.x = -Math.PI / 2
+  ground.position.set(0, floorY + 0.004, 0)
+  ground.renderOrder = -8
+  group.add(ground)
+
+  // Contact shadow: without it the phone floats. A soft dark ellipse on the floor is enough.
+  const shadowCanvas = document.createElement('canvas')
+  shadowCanvas.width = shadowCanvas.height = 128
+  const shctx = shadowCanvas.getContext('2d')
+  const shgrd = shctx.createRadialGradient(64, 64, 2, 64, 64, 62)
+  shgrd.addColorStop(0, 'rgba(0,0,0,0.75)')
+  shgrd.addColorStop(0.55, 'rgba(0,0,0,0.32)')
+  shgrd.addColorStop(1, 'rgba(0,0,0,0)')
+  shctx.fillStyle = shgrd
+  shctx.fillRect(0, 0, 128, 128)
+  const shadowMap = new THREE.CanvasTexture(shadowCanvas)
+  const shadow = new THREE.Mesh(
+    new THREE.PlaneGeometry(2.0, 1.0),
+    new THREE.MeshBasicMaterial({ map: shadowMap, transparent: true, depthWrite: false }),
+  )
+  shadow.renderOrder = -9
+  shadow.rotation.x = -Math.PI / 2
+  shadow.position.set(0, floorY + 0.002, 0.06)
+  group.add(shadow)
+
+  group.userData = {
+    haze: [horizon, horizonWide], floor, spill, dust, shadow,
+    /** Animate the environment. Every shot calls this: nothing in the frame may be static. */
+    update(t) {
+      dust.material.uniforms.uTime.value = t
+      // The light in the air breathes, very slowly.
+      const breathe = 0.92 + 0.08 * Math.sin(t * 0.43)
+      horizon.material.opacity = 0.17 * breathe
+      horizonWide.material.opacity = 0.09 * breathe
+      spill.material.opacity = 0.04 * breathe
+    },
+  }
   return group
 }
 
@@ -572,7 +951,11 @@ export function sampleGlyphPoints(texture, { count = 4200, threshold = 0.55, see
  * into the phone's outline at the start of shot 2. Both halves are additive points with the
  * same noise curl, so the cut lands mid-motion and the eye reads it as one continuous move.
  */
-export function makeSparks({ count, from, to, seed = 7, spread = 0.05, size = 3.4 } = {}) {
+export function makeSparks({
+  count, from, to, seed = 7, spread = 0.05, size = 3.4,
+  /** Endpoint colours. Two shots that hand a field to each other must pass the same pair. */
+  brand = 0x9FF3DC, deep = BRAND,
+} = {}) {
   const rnd = mulberry32(seed)
   const positions = new Float32Array(count * 3)
   const targets = new Float32Array(count * 3)
@@ -597,15 +980,15 @@ export function makeSparks({ count, from, to, seed = 7, spread = 0.05, size = 3.
   const mat = new THREE.ShaderMaterial({
     transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
     uniforms: {
-      uMorph: { value: 0 }, uOpacity: { value: 1 }, uTime: { value: 0 },
+      uMorph: { value: 0 }, uDisperse: { value: 0 }, uOpacity: { value: 1 }, uTime: { value: 0 },
       uSize: { value: size },
-      uBrand: { value: new THREE.Color(0x9FF3DC) },
-      uDeep: { value: new THREE.Color(BRAND) },
+      uBrand: { value: new THREE.Color(brand) },
+      uDeep: { value: new THREE.Color(deep) },
     },
     vertexShader: /* glsl */`
       attribute vec3 aTarget;
       attribute float aSeed;
-      uniform float uMorph, uTime, uSize;
+      uniform float uMorph, uDisperse, uTime, uSize;
       varying float vGlow;
       varying float vSeed;
       ${NOISE}
@@ -620,6 +1003,15 @@ export function makeSparks({ count, from, to, seed = 7, spread = 0.05, size = 3.
           snoise(pos * 0.7 + uTime * 0.3 + aSeed * 9.0 + 21.7),
           snoise(pos * 0.7 + uTime * 0.3 + aSeed * 9.0 + 51.3)
         ) * curl;
+        // Third stage: once the shape is formed the sparks must leave it. Holding them on the
+        // outline left a string of bright beads around the phone — a match cut that never ended.
+        vec3 dir = normalize(vec3(
+          snoise(vec3(aSeed * 7.0)),
+          snoise(vec3(aSeed * 13.0 + 3.0)) + 0.35,
+          snoise(vec3(aSeed * 19.0 + 7.0))
+        ) + 0.0001);
+        pos += dir * uDisperse * (0.30 + aSeed * 0.9);
+
         vec4 mv = modelViewMatrix * vec4(pos, 1.0);
         gl_Position = projectionMatrix * mv;
         gl_PointSize = uSize * (1.0 + aSeed) * (6.0 / -mv.z);
@@ -648,4 +1040,64 @@ export function makeSparks({ count, from, to, seed = 7, spread = 0.05, size = 3.
   const points = new THREE.Points(geo, mat)
   points.userData = { mat, geo }
   return points
+}
+
+
+/**
+ * A frosted pill: the shape the assistant's step narration arrives in.
+ *
+ * Background, border, dot and baseline are baked into one canvas, so the corner radius,
+ * the light edge and the text can never drift apart. Three separate meshes is exactly how
+ * a clean interface starts to look handmade.
+ */
+export function makePill(text, {
+  px = 40, color = '#EAF6F2', weight = 500,
+  bg = 'rgba(17,26,31,0.72)', border = 'rgba(127,227,200,0.28)',
+  dotColor = null, worldHeight = null, layer = LAYER_UI,
+} = {}) {
+  const SS = 2
+  const canvas = document.createElement('canvas')
+  const ctx = canvas.getContext('2d')
+  const font = `${weight} ${px * SS}px "Noto Sans CJK SC", "Microsoft YaHei", sans-serif`
+  ctx.font = font
+  const tw = ctx.measureText(text).width
+  const padX = px * SS * 0.60
+  const padY = px * SS * 0.44
+  const dotW = dotColor ? px * SS * 1.15 : 0
+  canvas.width = Math.ceil(tw + padX * 2 + dotW)
+  canvas.height = Math.ceil(px * SS + padY * 2)
+
+  roundRect(ctx, 1.5, 1.5, canvas.width - 3, canvas.height - 3, (canvas.height - 3) / 2)
+  ctx.fillStyle = bg
+  ctx.fill()
+  ctx.lineWidth = 2
+  ctx.strokeStyle = border
+  ctx.stroke()
+
+  ctx.font = font
+  ctx.fillStyle = color
+  ctx.textBaseline = 'middle'
+  ctx.textAlign = 'left'
+  let tx = padX
+  if (dotColor) {
+    ctx.beginPath()
+    ctx.arc(padX + px * SS * 0.16, canvas.height / 2, px * SS * 0.19, 0, Math.PI * 2)
+    ctx.fillStyle = dotColor
+    ctx.fill()
+    tx = padX + dotW * 0.92
+  }
+  ctx.fillText(text, tx, canvas.height / 2 + px * SS * 0.03)
+
+  const tex = new THREE.CanvasTexture(canvas)
+  tex.colorSpace = THREE.SRGBColorSpace
+  tex.anisotropy = 8
+  const mat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false })
+  mat.toneMapped = false
+  const aspect = canvas.width / canvas.height
+  const heightUnits = worldHeight ?? (canvas.height / SS) * (2 / 1080)
+  const widthUnits = heightUnits * aspect
+  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(widthUnits, heightUnits), mat)
+  mesh.layers.set(layer)
+  mesh.userData = { widthUnits, heightUnits, aspect, baseY: 0, baseX: 0 }
+  return mesh
 }

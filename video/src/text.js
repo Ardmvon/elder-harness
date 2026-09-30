@@ -16,10 +16,17 @@ const SS = 2
 export function makeTextTexture({
   text, size = 56, weight = 400, color = '#FFFFFF', lineHeight = 1.35,
   align = 'left', padding = 24, maxWidth = null, letterSpacing = 0,
+  /** Font stack. Defaults to the app's sans; the film's chapter/subtitle voice is serif. */
+  family = FAMILY,
+  italic = false,
+  /** Dark bloom behind the glyphs (CSS px), the reference film's subtitle legibility trick. */
+  shadowColor = null,
+  shadowBlur = 0,
 }) {
   const canvas = document.createElement('canvas')
   const ctx = canvas.getContext('2d')
-  const font = `${weight} ${size * SS}px ${FAMILY}`
+  const style = italic ? 'italic ' : ''
+  const font = `${style}${weight} ${size * SS}px ${family}`
 
   // Measure first so the texture is exactly the size of the text: a canvas that
   // is mostly empty still costs memory and blurs when filtered.
@@ -38,6 +45,7 @@ export function makeTextTexture({
   ctx.font = font
   if (letterSpacing) ctx.letterSpacing = `${letterSpacing * SS}px`
   ctx.fillStyle = color
+  if (shadowColor) { ctx.shadowColor = shadowColor; ctx.shadowBlur = shadowBlur * SS }
   ctx.textBaseline = 'top'
   for (let i = 0; i < lines.length; i++) {
     const x = align === 'center' ? canvas.width / 2 : padding * SS
