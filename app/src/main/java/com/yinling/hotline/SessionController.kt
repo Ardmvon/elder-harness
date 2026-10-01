@@ -9,6 +9,7 @@ import com.yinling.core.AgentMessage
 import com.yinling.core.AgentOutcome
 import com.yinling.core.AgentStep
 import com.yinling.core.ScreenSnapshot
+import com.yinling.core.ToolCall
 import com.yinling.core.ToolInvocation
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -295,6 +296,139 @@ class SessionController(private val app: HotlineApp) : FamilyGateway {
             val actionable = hidden.count { it.clickable || it.longClickable }
             LoopLog.event("[census-hidden] n=${hidden.size} actionable=$actionable roles=[$roles]")
         }
+    }
+
+    /**
+     * Debug-only coordinate calibration. It does not tap: it asks the model for the normalized
+     * centre of controls whose accessibility bounds are known, then compares the answer with those
+     * bounds. This separates model estimation error from gesture dispatch error.
+     */
+    fun calibrateTap(maxTargets: Int = 8) {
+        scope.launch {
+            try {
+                delay(700) // let the debug Activity move behind the page being measured
+                val screen = phoneTools.observe()
+                val width = screen.width
+                val height = screen.height
+                if (width <= 0 || height <= 0) {
+                    LoopLog.event("[calib] 当前页面没有可用尺寸")
+                    return@launch
+                }
+                val targets = screen.elements
+                    .filter {
+                        it.bounds.size == 4 &&
+                            (it.bounds[2] - it.bounds[0]) > 8 &&
+                            (it.bounds[3] - it.bounds[1]) > 8 &&
+                            (it.text.isNotBlank() || it.description.isNotBlank())
+                    }
+                    .distinctBy { it.text.ifBlank { it.description } }
+                    .sortedByDescending { it.clickable }
+                    .take(maxTargets)
+                if (targets.isEmpty()) {
+                    LoopLog.event("[calib] 当前页面没有带文字的可点按控件")
+                    return@launch
+                }
+
+                val oldVision = visionEnabled
+                visionEnabled = true
+                try {
+                    val shot = phoneTools.execute(ToolCall(name = "screenshot", revision = screen.revision))
+                    val image = shot.image
+                    if (!shot.success || image == null) {
+                        LoopLog.event("[calib] 截图失败：${shot.detail}")
+                        return@launch
+                    }
+                    val planner = CloudPlanner(
+                        config = ModelConfig(endpoint, model, apiKey, visionEnabled = true),
+                        log = ::logPlanner,
+                    )
+                    var samples = 0
+                    var hits = 0
+                    val errors = mutableListOf<Double>()
+                    var dxSum = 0.0
+                    var dySum = 0.0
+                    targets.forEach { target ->
+                        val label = target.text.ifBlank { target.description }.take(30)
+                        val prompt = "当前页面截图如下。请只根据截图判断控件「$label」的中心点，\n" +
+                            "输出严格的归一化坐标，格式：x=0.123,y=0.456。\n" +
+                            "不要解释，不要输出其他文字。"
+                        val step = runCatching {
+                            planner.decide(
+                                CALIBRATION_INSTRUCTIONS,
+                                emptyList(),
+                                listOf(AgentMessage(AgentMessage.Role.USER, content = prompt, image = image)),
+                            )
+                        }.getOrNull()
+                        val point = (step as? AgentStep.Final)?.message?.let(::parseCalibrationPoint)
+                        if (point == null) {
+                            LoopLog.event("[calib] $label：模型没有给出可解析坐标")
+                            return@forEach
+                        }
+                        val predictedX = point.first * width
+                        val predictedY = point.second * height
+                        val b = target.bounds
+                        val centerX = (b[0] + b[2]) / 2.0
+                        val centerY = (b[1] + b[3]) / 2.0
+                        val dx = predictedX - centerX
+                        val dy = predictedY - centerY
+                        val distance = kotlin.math.sqrt(dx * dx + dy * dy)
+                        val hit = predictedX in b[0].toFloat()..b[2].toFloat() &&
+                            predictedY in b[1].toFloat()..b[3].toFloat()
+                        samples++
+                        if (hit) hits++
+                        errors += distance
+                        dxSum += dx
+                        dySum += dy
+                        val line = (
+                            "[calib] label=$label pred=(%.2f,%.2f) actual=(%.2f,%.2f) " +
+                                "dx=%.0f dy=%.0f dist=%.0fpx hit=%s"
+                            ).format(
+                            point.first, point.second,
+                            centerX / width, centerY / height,
+                            dx, dy, distance, hit,
+                        )
+                        LoopLog.event(line)
+                    }
+                    if (samples > 0) {
+                        val sorted = errors.sorted()
+                        val p50 = sorted[(samples * 50 / 100).coerceIn(0, samples - 1)]
+                        val p90 = sorted[((samples * 90 + 99) / 100 - 1).coerceIn(0, samples - 1)]
+                        val line = (
+                            "[calib] SUMMARY samples=$samples hit=$hits/$samples " +
+                                "mean=%.0fpx p50=%.0fpx p90=%.0fpx meanDx=%.1f meanDy=%.1f"
+                            ).format(
+                            errors.average(), p50, p90, dxSum / samples, dySum / samples,
+                        )
+                        LoopLog.event(line)
+                    } else {
+                        LoopLog.event("[calib] 没有拿到任何样本")
+                    }
+                } finally {
+                    visionEnabled = oldVision
+                }
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                LoopLog.event("[calib] 失败：${error.javaClass.simpleName} ${error.message}")
+            }
+        }
+    }
+
+    /** Parses the strict x=...,y=... calibration answer, with a comma-only fallback. */
+    private fun parseCalibrationPoint(text: String): Pair<Float, Float>? {
+        val strict = Regex(
+            "x\\s*[=:：]\\s*(-?\\d*\\.?\\d+)[^0-9-]+y\\s*[=:：]\\s*(-?\\d*\\.?\\d+)",
+            RegexOption.IGNORE_CASE,
+        ).find(text)
+        val fallback = if (strict == null) {
+            Regex("(-?\\d*\\.?\\d+)\\s*[,，]\\s*(-?\\d*\\.?\\d+)").find(text)
+        } else {
+            null
+        }
+        val match = strict ?: fallback ?: return null
+        val x = match.groupValues[1].toFloatOrNull()?.coerceIn(0f, 1f) ?: return null
+        val y = match.groupValues[2].toFloatOrNull()?.coerceIn(0f, 1f) ?: return null
+        return x to y
     }
 
     /** The person answered a question; their words go into the conversation and the task continues. */
@@ -827,3 +961,9 @@ class SessionController(private val app: HotlineApp) : FamilyGateway {
 
 
 private const val KEY_CURRENT_SESSION = "current_session_id"
+
+private val CALIBRATION_INSTRUCTIONS = """
+你正在做坐标校准。只根据用户提供的截图判断目标控件的位置。
+只输出归一化坐标，格式必须是：x=0.123,y=0.456
+不要解释，不要输出其他文字。
+""".trimIndent()

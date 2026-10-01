@@ -17,7 +17,7 @@ object DebugCommand {
     /** Keys declared as booleans; every other key is read as a string. */
     private val BOOLEAN_EXTRAS = setOf(
         EXTRA_ENABLE, EXTRA_VISION, EXTRA_AUTO_CONFIRM, EXTRA_START, EXTRA_CLEAR_LOG, EXTRA_RESTORE,
-        EXTRA_CENSUS, EXTRA_PAIR, EXTRA_CHECK_IN, EXTRA_VOICE_TEST,
+        EXTRA_CENSUS, EXTRA_CALIBRATE_TAP, EXTRA_PAIR, EXTRA_CHECK_IN, EXTRA_VOICE_TEST,
     )
 
     /**
@@ -57,6 +57,9 @@ object DebugCommand {
 
     /** Observes the current screen once and logs what the tree offered versus what we show. */
     const val EXTRA_CENSUS = "census"
+
+    /** Measures model-estimated tap coordinates against accessibility bounds; never taps. */
+    const val EXTRA_CALIBRATE_TAP = "calibrate_tap"
 
     /** Restores the most recent saved task instead of starting a new one. */
     const val EXTRA_RESTORE = "restore"
@@ -182,6 +185,12 @@ object DebugCommand {
         if (extras.value(EXTRA_CENSUS) == true) {
             LoopLog.event("[debug] census on current screen")
             session.censusOnce()
+            return true
+        }
+
+        if (extras.value(EXTRA_CALIBRATE_TAP) == true) {
+            LoopLog.event("[debug] tap calibration on current screen")
+            session.calibrateTap()
             return true
         }
 
