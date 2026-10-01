@@ -746,6 +746,16 @@ fun main() = runBlocking {
             ) is OutcomeVerdict.Supported,
         )
 
+        // 不应该误伤：声明里同时引用收件人名和正文，正文才是本轮输入的那段
+        check(
+            "收件人名不算 payload，真正输入过的正文仍然算证据",
+            OutcomeCheck.check(
+                "已经帮您在微信「文件传输助手」的输入框里填好了「我到家了」，没有点发送。",
+                listOf(call("tap_xy", "0.4 0.955"), call("paste_text", "我到家了")),
+                started,
+            ) is OutcomeVerdict.Supported,
+        )
+
         // 不应该误伤：声明引用的时刻在运行之后
         check(
             "引用本次运行之后的时刻，不算借用旧证据",

@@ -67,12 +67,6 @@ object OutcomeCheck {
     /** Quoted fragments: what the run claims it produced, or a label it read. */
     private val QUOTED = Regex("[「“\"']([^」”\"']{1,40})[」”\"']")
 
-    /** Marks the recipient, so a recipient name is not mistaken for the produced text. */
-    private val RECIPIENT_MARKERS = listOf("给", "向")
-
-    /** Marks field/value forms such as "填「姓名」为「张三」". */
-    private val VALUE_MARKERS = listOf("为")
-
     /** Clock readings such as 17:37 — used as a time anchor against the run's own start. */
     private val CLOCK = Regex("(?<!\\d)([01]?\\d|2[0-3]):([0-5]\\d)(?!\\d)")
 
@@ -88,32 +82,24 @@ object OutcomeCheck {
         if (!assertsChange) return OutcomeVerdict.Supported
         val successful = calls.filter { it.success }
 
-        // R1 — text provenance. If the run says it produced text, that text has to have been typed
-        // into this run. A pre-filled box and a borrowed message both fail this, which is the point.
-        val matches = QUOTED.findAll(claim).toList()
-        val quoted = matches.map { it.groupValues[1].trim() }.filter { it.isNotEmpty() }
+        // R1 — text provenance. If the run says it produced text, at least one quoted fragment must
+        // have been typed into this run. Checking "at least one" deliberately avoids guessing which
+        // quote is the payload: "在微信「文件传输助手」的输入框里填好了「我到家了」" quotes both the
+        // recipient/context and the message; the longest fragments are often labels, not payload.
+        // A claim whose every quote is borrowed still fails, which is the floor this check provides.
+        val quoted = QUOTED.findAll(claim)
+            .map { it.groupValues[1].trim() }
+            .filter { it.isNotEmpty() }
+            .toList()
         if (quoted.isNotEmpty()) {
-            val typed = successful.filter { it.tool in TEXT_ENTRY }.joinToString(" ") { it.argument }
-            // "已发送「我到家了」给「女儿」": the recipient is not the payload. "填「姓名」为「张三」":
-            // the value after 为/是 is the payload. Use those positions before falling back to the
-            // longest quote, so short messages are not mistaken for a longer recipient label.
-            val recipientAt = RECIPIENT_MARKERS.mapNotNull { claim.indexOf(it).takeIf { at -> at >= 0 } }.minOrNull()
-            val isFillClaim = claim.contains("已填") || claim.contains("已输入") || claim.contains("已设置")
-            val valueAt = if (isFillClaim) {
-                VALUE_MARKERS.mapNotNull { claim.indexOf(it).takeIf { at -> at >= 0 } }.minOrNull()
-            } else {
-                null
-            }
-            val payload = when {
-                recipientAt != null -> matches.filter { it.range.first < recipientAt }
-                valueAt != null -> matches.filter { it.range.first > valueAt }
-                else -> matches
-            }.map { it.groupValues[1].trim() }.filter { it.isNotEmpty() }
-                .ifEmpty { quoted }
-            val evidence = payload.maxByOrNull { it.length }
-            if (evidence == null || !typed.contains(evidence)) {
+            val typed = successful
+                .filter { it.tool in TEXT_ENTRY }
+                .joinToString(" ") { it.argument }
+            val traceable = quoted.firstOrNull { typed.contains(it) }
+            if (traceable == null) {
+                val evidence = quoted.maxByOrNull { it.length } ?: quoted.first()
                 return OutcomeVerdict.Unsupported(
-                    "声明里引用的文字（「${evidence ?: quoted.first()}」）不是这一次输入进去的，" +
+                    "声明里引用的文字（「$evidence」）不是这一次输入进去的，" +
                         "可能是屏幕上本来就有的内容",
                 )
             }
