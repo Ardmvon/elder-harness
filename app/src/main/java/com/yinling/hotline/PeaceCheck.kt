@@ -37,6 +37,10 @@ class PeaceCheck(private val context: Context) {
     /** Judge and log, but never send. Used while testing so the family is not spammed. */
     var dryRun = false
 
+    /** Prevents a slow server call from being duplicated by the next one-minute tick. */
+    @Volatile
+    private var delivering = false
+
     var enabled: Boolean
         get() = prefs.getBoolean(KEY_ENABLED, false)
         set(value) = prefs.edit().putBoolean(KEY_ENABLED, value).apply()
@@ -107,28 +111,55 @@ class PeaceCheck(private val context: Context) {
             is PeaceDecision.Alert -> decision.message
             else -> null
         }
-        // Tell the circle as well, when the phone has been paired with a server. The SMS path stays
-        // as it is: for many families a text message is the only channel that is actually read.
-        if (announce && message != null && server.isConfigured()) {
-            val kind = if (decision is PeaceDecision.DailyOk) "peace" else "alert"
-            val title = if (kind == "peace") "报平安" else "今天一直没有动静"
-            scope.launch { server.postEvent(kind, title, message) }
+        if (message == null) {
+            LoopLog.event("[peace] $decision")
+            return decision
         }
-        if (message != null && !announce) {
+        if (!announce) {
             LoopLog.event("[peace] 预览（不发送）：${decision::class.simpleName}")
             return decision
         }
-        if (message != null) {
-            val told = tell(message)
-            if (told) prefs.edit().putLong(KEY_LAST_ALERT_DAY, today.toEpochDay()).apply()
-            LoopLog.event(
-                "[peace] ${if (told) "已给家人发消息" else if (dryRun) "演练，未发送" else "未能发消息"}" +
-                    "：${decision::class.simpleName}",
-            )
-        } else {
-            LoopLog.event("[peace] $decision")
+        if (dryRun) {
+            LoopLog.event("[peace] 演练，未发送：${decision::class.simpleName}")
+            return decision
         }
+        val kind = if (decision is PeaceDecision.DailyOk) "peace" else "alert"
+        val title = if (kind == "peace") "报平安" else "今天一直没有动静"
+        deliver(message, kind, title, today)
         return decision
+    }
+
+    /**
+     * Server first, SMS fallback. The day is marked only after one channel succeeds, so a network
+     * failure retries on the next tick instead of being erased by an optimistic in-memory flag.
+     */
+    private fun deliver(message: String, kind: String, title: String, today: LocalDate) {
+        if (delivering) return
+        delivering = true
+        if (!server.isConfigured()) {
+            try {
+                if (tell(message)) markTold(today)
+            } finally {
+                delivering = false
+            }
+            return
+        }
+        scope.launch {
+            try {
+                if (server.postEvent(kind, title, message)) {
+                    markTold(today)
+                } else if (session.familyPhone.isNotBlank() && tell(message)) {
+                    markTold(today)
+                }
+            } finally {
+                delivering = false
+            }
+        }
+    }
+
+    private fun markTold(today: LocalDate) {
+        prefs.edit().putLong(KEY_LAST_ALERT_DAY, today.toEpochDay()).apply()
+        LoopLog.event("[peace] 已给家人发消息：${today}")
     }
 
     /** What would happen right now, without sending anything. Used by the settings screen. */

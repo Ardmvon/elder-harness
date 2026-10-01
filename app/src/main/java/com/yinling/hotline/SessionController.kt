@@ -8,7 +8,6 @@ import com.yinling.core.AgentLoop
 import com.yinling.core.AgentMessage
 import com.yinling.core.AgentOutcome
 import com.yinling.core.AgentStep
-import com.yinling.core.DecisionCache
 import com.yinling.core.ScreenSnapshot
 import com.yinling.core.ToolInvocation
 import kotlinx.coroutines.CompletableDeferred
@@ -60,6 +59,9 @@ class SessionController(private val app: HotlineApp) : FamilyGateway {
 
     /** Whether this phone can actually speak, for the settings screen. */
     fun speakerStatus(): String = app.speaker.status()
+
+    /** UI-facing "the assistant is reading right now", shared by home and the floating panel. */
+    val speaking = app.speaker.speaking
 
     /** Called when the family switches speech on, so the status can be reported honestly at once. */
     fun tryPrepareSpeaker() = app.speaker.prepare()
@@ -130,7 +132,6 @@ class SessionController(private val app: HotlineApp) : FamilyGateway {
             SecretStore.save(app, trimmed)
         }
 
-    private val cache = RecipeCache(prefs)
     private val phoneTools = AndroidPhoneTools(app)
     private val sessions = SessionStore(app)
 
@@ -153,9 +154,12 @@ class SessionController(private val app: HotlineApp) : FamilyGateway {
     }
 
     /** Id of the task currently loaded, so its transcript can be saved and resumed. */
-    private var sessionId: String = newSessionId()
+    private var sessionId: String = prefs.getString(KEY_CURRENT_SESSION, null)
+        ?.takeIf { it.isNotBlank() }
+        ?: newSessionId().also { prefs.edit().putString(KEY_CURRENT_SESSION, it).apply() }
     private var loop: AgentLoop? = null
     private var job: Job? = null
+    private var skillJob: Job? = null
     private var confirmation: CompletableDeferred<Boolean>? = null
 
     /** Once the person allows a coordinate tap in this run, do not ask again. */
@@ -176,11 +180,17 @@ class SessionController(private val app: HotlineApp) : FamilyGateway {
     fun start(goal: String) {
         LoopLog.event("[session] start goal=${goal.take(40)}")
         if (goal.isBlank()) return
-        job?.cancel()
-        // Keep the interrupted task instead of throwing its transcript (and its cache prefix) away.
+        // Snapshot the interrupted task before cancelling it; the loop may otherwise still be
+        // appending its own tool result while we are saving.
         saveCurrentSession()
+        job?.cancel()
+        skillJob?.cancel()
+        skillJob = null
         sessionId = newSessionId()
-        prefs.edit().putString("goal", goal.trim()).apply()
+        prefs.edit()
+            .putString("goal", goal.trim())
+            .putString(KEY_CURRENT_SESSION, sessionId)
+            .apply()
         loop = null
         blindTapApproved = false
         mutableState.value = SessionState(goal.trim(), "正在看看当前页面。", TaskPhase.WORKING)
@@ -193,9 +203,14 @@ class SessionController(private val app: HotlineApp) : FamilyGateway {
         val running = buildLoop()
         if (!running.restore(saved.messages, saved.steps)) return
         job?.cancel()
+        skillJob?.cancel()
+        skillJob = null
         sessionId = saved.id
         loop = running
-        prefs.edit().putString("goal", saved.goal).apply()
+        prefs.edit()
+            .putString("goal", saved.goal)
+            .putString(KEY_CURRENT_SESSION, sessionId)
+            .apply()
         mutableState.value = SessionState(
             goal = saved.goal,
             message = "接着上次没办完的事。",
@@ -301,7 +316,7 @@ class SessionController(private val app: HotlineApp) : FamilyGateway {
             awaitingSuccessConfirmation = false,
             message = "正在把这次步骤记成候选技巧…",
         )
-        scope.launch {
+        skillJob = scope.launch {
             val skill = runCatching {
                 skillWriter.draft(goal, lastScreenApp, running.conversation)
             }.getOrNull()
@@ -330,7 +345,12 @@ class SessionController(private val app: HotlineApp) : FamilyGateway {
             if (resume && loop === running && running.conversation.isEmpty()) {
                 // Coming back after a restart: reload the saved conversation before planning, so the
                 // request prefix (and therefore the provider cache) is the same as last time.
-                sessions.load(sessionId)?.let { saved ->
+                // The fallback covers upgrades from builds that did not persist the session id yet.
+                val saved = sessions.load(sessionId)
+                    ?: sessions.list().firstOrNull { it.unfinished && it.goal == state.value.goal }
+                if (saved != null) {
+                    sessionId = saved.id
+                    prefs.edit().putString(KEY_CURRENT_SESSION, sessionId).apply()
                     if (running.restore(saved.messages, saved.steps)) {
                         LoopLog.event("[session] restored from disk id=$sessionId messages=${saved.messages.size}")
                     }
@@ -363,7 +383,6 @@ class SessionController(private val app: HotlineApp) : FamilyGateway {
         approval = approval(),
         instructions = CloudPlanner.INSTRUCTIONS + SkillCatalog.summary(),
         hook = hook,
-        cache = cache,
         renderScreen = { screen ->
             lastScreenApp = screen.app
             com.yinling.core.PhoneToolCatalog.render(screen) +
@@ -533,7 +552,6 @@ class SessionController(private val app: HotlineApp) : FamilyGateway {
         LoopLog.saveScreenshot()
         when (outcome) {
             is AgentOutcome.COMPLETED -> {
-                rememberRecipe()
                 mutableState.value = state.value.copy(
                     message = outcome.message, phase = TaskPhase.COMPLETED,
                     step = steps, hasPendingApproval = false, awaitingSuccessConfirmation = true,
@@ -580,20 +598,6 @@ class SessionController(private val app: HotlineApp) : FamilyGateway {
         saveCurrentSession()
     }
 
-    /** Saves the action sequence that just worked, so a repeat visit can replay it. */
-    private suspend fun rememberRecipe() {
-        val running = loop ?: return
-        val goal = state.value.goal
-        if (goal.isBlank()) return
-        val actions = running.conversation
-            .flatMap { it.toolCalls }
-            .filter { it.tool in REPLAYABLE }
-        if (actions.isEmpty()) return
-        val screen = phoneTools.observe()
-        if (screen.revision.isBlank()) return
-        cache.remember(goal, screen, actions)
-    }
-
     fun answer(approved: Boolean) {
         confirmation?.complete(approved)
     }
@@ -610,8 +614,16 @@ class SessionController(private val app: HotlineApp) : FamilyGateway {
 
     fun finish() {
         stop()
+        // A skill summary may still be running. Invalidate its session id and cancel it, otherwise
+        // its late result could write a message into the next, empty session.
+        skillJob?.cancel()
+        skillJob = null
+        sessionId = newSessionId()
         loop = null
-        prefs.edit().remove("goal").apply()
+        prefs.edit()
+            .remove("goal")
+            .putString(KEY_CURRENT_SESSION, sessionId)
+            .apply()
         mutableState.value = SessionState()
     }
 
@@ -729,11 +741,12 @@ class SessionController(private val app: HotlineApp) : FamilyGateway {
     override fun requestHelp(goal: String, reason: String) {
         stop()
         val context = "目标：$goal\n卡在：${reason.ifBlank { "说不清楚，需要人看一下" }}"
+        val startedSession = sessionId
         if (server.isConfigured()) {
-            // The circle gets a structured request they can see on a web page and take over, instead
-            // of a text-message draft the person still has to send themselves.
+            // Report success only after the server accepted the event. An optimistic "already told
+            // them" would be a lie whenever the network is down and no fallback number exists.
             mutableState.value = state.value.copy(
-                message = "已经告诉家人了，他们会尽快联系您。",
+                message = "正在联系家人，请稍等…",
                 phase = TaskPhase.NEEDS_FAMILY,
             )
             scope.launch {
@@ -743,18 +756,39 @@ class SessionController(private val app: HotlineApp) : FamilyGateway {
                     body = reason.ifBlank { "需要人帮忙看一下" },
                     context = context,
                 )
-                if (!ok) {
-                    // Server unreachable: fall back to the channel that needs nothing from anyone.
+                if (sessionId != startedSession) return@launch
+                if (ok) {
+                    mutableState.value = state.value.copy(
+                        message = "已经告诉家人了，他们会尽快联系您。",
+                        phase = TaskPhase.NEEDS_FAMILY,
+                    )
+                } else if (familyPhone.isNotBlank()) {
+                    mutableState.value = state.value.copy(
+                        message = "服务器暂时联系不上，请在短信应用里点发送求助。",
+                        phase = TaskPhase.NEEDS_FAMILY,
+                    )
                     smsHelp(goal, reason)
+                } else {
+                    mutableState.value = state.value.copy(
+                        message = "没联系上家人。请让家人检查网络或设置后再试。",
+                        phase = TaskPhase.NEEDS_FAMILY,
+                    )
                 }
             }
             return
         }
-        mutableState.value = state.value.copy(
-            message = "请在短信应用发送求助，家人收到后可回电。",
-            phase = TaskPhase.NEEDS_FAMILY,
-        )
-        smsHelp(goal, reason)
+        if (familyPhone.isNotBlank()) {
+            mutableState.value = state.value.copy(
+                message = "请在短信应用发送求助，家人收到后可回电。",
+                phase = TaskPhase.NEEDS_FAMILY,
+            )
+            smsHelp(goal, reason)
+        } else {
+            mutableState.value = state.value.copy(
+                message = "还没设置家人联系方式，请让家人先完成设置。",
+                phase = TaskPhase.NEEDS_FAMILY,
+            )
+        }
     }
 
     /** The zero-infrastructure fallback: a text-message draft the person sends themselves. */
@@ -773,38 +807,7 @@ class SessionController(private val app: HotlineApp) : FamilyGateway {
         app.startActivity(Intent(Intent.ACTION_DIAL, Uri.parse("tel:$familyPhone")).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
     }
 
-    /**
-     * Remembers an action sequence per screen. Deliberately local and exact-match: it stores
-     * what the same goal did on the same page, and never guesses an action on a page it has
-     * not seen. Replay still goes through the loop's validation and the person's approval.
-     */
-    private class RecipeCache(private val prefs: android.content.SharedPreferences) : DecisionCache {
-        private val entries = linkedMapOf<String, List<ToolInvocation>>()
-
-        override suspend fun suggest(goal: String, screen: ScreenSnapshot): List<ToolInvocation>? =
-            entries[key(goal, screen)]
-
-        override suspend fun remember(goal: String, screen: ScreenSnapshot, invocations: List<ToolInvocation>) {
-            if (invocations.isEmpty()) return
-            entries[key(goal, screen)] = invocations
-            while (entries.size > MAX_RECIPES) {
-                entries.remove(entries.keys.first())
-            }
-        }
-
-        private fun key(goal: String, screen: ScreenSnapshot): String =
-            "${goal.trim()}|${screen.app.orEmpty()}|${screen.revision}"
-
-        private companion object {
-            const val MAX_RECIPES = 20
-        }
-    }
-
-    private companion object {
-        /** Tools whose replay is safe: they never send, pay, submit or authenticate. */
-        val REPLAYABLE = setOf(
-            "tap_text", "click", "scroll", "back", "home", "recents",
-            "open_app", "open_settings", "wait", "read_screen",
-        )
-    }
 }
+
+
+private const val KEY_CURRENT_SESSION = "current_session_id"

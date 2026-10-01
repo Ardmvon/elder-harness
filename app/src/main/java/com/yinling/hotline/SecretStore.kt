@@ -50,13 +50,21 @@ object SecretStore {
                 .putString(ciphertextKey, Base64.encodeToString(bytes, Base64.NO_WRAP))
                 .putString(ivKey, Base64.encodeToString(cipher.iv, Base64.NO_WRAP))
                 .apply()
-        }.onFailure { LoopLog.event("[key] 保存失败，本次不落盘：${it.message}") }
+        }.onFailure {
+            // Never leave an older secret on disk while the caller believes the new one is saved.
+            prefs.edit().remove(ciphertextKey).remove(ivKey).apply()
+            LoopLog.event("[key] 保存失败，旧值已清除：${it.message}")
+        }
     }
 
     fun load(context: Context, name: String = API_KEY): String {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val data = prefs.getString("${name}_enc", null) ?: return ""
-        val iv = prefs.getString("${name}_iv", null) ?: return ""
+        val iv = prefs.getString("${name}_iv", null)
+        if (iv == null) {
+            prefs.edit().remove("${name}_enc").apply()
+            return ""
+        }
         return runCatching {
             val cipher = Cipher.getInstance(TRANSFORM)
             cipher.init(

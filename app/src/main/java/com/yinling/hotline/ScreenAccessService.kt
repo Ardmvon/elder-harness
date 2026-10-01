@@ -57,6 +57,11 @@ class ScreenAccessService : AccessibilityService() {
         /** Above this, upload time matters more than fine detail; fall back to lossy. */
         private const val MODEL_IMAGE_MAX_BYTES = 700_000
 
+        /** Throttle so accessibility traffic does not turn into a prefs write storm. */
+        private const val ACTIVITY_NOTE_INTERVAL_MS = 60_000L
+        @Volatile
+        private var lastActivityNoteAt = 0L
+
         /** Size of the newest screenshot as the model sees it, for tap_xy accuracy checks. */
         @Volatile
         var lastScreenshotSize: Pair<Int, Int>? = null
@@ -144,7 +149,17 @@ class ScreenAccessService : AccessibilityService() {
         }
         Notices.clearAccessibility(this)
     }
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) = Unit
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        // This is the production hook for "the phone was used": accessibility events arrive from the
+        // person's own apps, not only from our task loop. Our own overlays/activities are not user
+        // activity and must not make the daily peace message report a use that never happened.
+        if (event?.packageName?.toString() == packageName) return
+        // Throttled to one cheap prefs write/minute.
+        val now = System.currentTimeMillis()
+        if (now - lastActivityNoteAt < ACTIVITY_NOTE_INTERVAL_MS) return
+        lastActivityNoteAt = now
+        (applicationContext as? HotlineApp)?.peace?.noteActivity(now)
+    }
     override fun onInterrupt() { (application as HotlineApp).session.stop() }
     override fun onDestroy() {
         if (active === this) active = null
@@ -352,14 +367,8 @@ class ScreenAccessService : AccessibilityService() {
             val ok = performGlobalAction(action)
             return ToolResult(ok, if (ok) "系统已接收导航操作，等待检查页面。" else "系统未接受导航操作。")
         }
-        // Coordinate tapping exists for pages that expose no accessibility tree (WeChat and
-        // friends), where there is nothing to look up by node at all.
-        if (call.name == "tap") {
-            if (call.x !in 0 until screen.width || call.y !in 0 until screen.height) {
-                return failure("out_of_bounds", "点按位置超出屏幕范围，请根据截图重新估计。")
-            }
-            return tapAt(call)
-        }
+        // Sensitive pages are refused before every action that can touch the app, including raw
+        // coordinate gestures. "Back/home" above stay available so the person is never trapped.
         if (screen.sensitive) {
             return failure(
                 "requires_user",
@@ -370,7 +379,14 @@ class ScreenAccessService : AccessibilityService() {
                 },
             )
         }
-        if (call.name == "screenshot") return screenshot(screen)
+        // Coordinate tapping exists for pages that expose no accessibility tree (WeChat and
+        // friends), where there is nothing to look up by node at all.
+        if (call.name == "tap") {
+            if (call.x !in 0 until screen.width || call.y !in 0 until screen.height) {
+                return failure("out_of_bounds", "点按位置超出屏幕范围，请根据截图重新估计。")
+            }
+            return tapAt(call)
+        }
         if (call.name == "swipe") {
             if (call.x !in 0 until screen.width || call.endX !in 0 until screen.width ||
                 call.y !in 0 until screen.height || call.endY !in 0 until screen.height) {
@@ -378,8 +394,10 @@ class ScreenAccessService : AccessibilityService() {
             }
             return gesture(call)
         }
+        if (call.name == "screenshot") return screenshot(screen)
         fun stillTheSame(id: String, wanted: String): Boolean {
             val element = screen.elements.find { it.id == id } ?: return false
+            if (wanted.startsWith("bounds:")) return "bounds:${element.bounds}" == wanted
             if (wanted.isBlank()) return true
             return element.text == wanted || element.description == wanted
         }
@@ -430,7 +448,9 @@ class ScreenAccessService : AccessibilityService() {
         if (screen.elements.none { it.id == target } && call.name != "tap_text") {
             return failure("missing_target", "控件编号不存在于当前观察，请重新选择。")
         }
-        if (staleRevision && call.name != "tap_text" && !stillTheSame(target, call.argument)) {
+        if (staleRevision && call.name != "tap_text" && call.target.isNotBlank() &&
+            (call.expected.isBlank() || !stillTheSame(call.target, call.expected))
+        ) {
             return failure("stale_screen", "页面已变化，请根据新页面重新选择操作。")
         }
         val node = page.nodes[target] ?: return failure("missing_target", "控件已消失，请重新观察。")
@@ -710,6 +730,7 @@ class ScreenAccessService : AccessibilityService() {
     }
 
     /** Scaling, compression and base64 for one screenshot. CPU-bound: call it off the main thread. */
+    @android.annotation.TargetApi(android.os.Build.VERSION_CODES.R)
     private fun encodeShot(bitmap: Bitmap, screen: ScreenSnapshot): ToolResult {
         val scaled = scaleForModel(bitmap)
         // Drawing needs a mutable bitmap, and both scaleForModel's result and the hardware-buffer

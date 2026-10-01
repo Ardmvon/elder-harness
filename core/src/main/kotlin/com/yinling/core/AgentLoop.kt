@@ -83,12 +83,6 @@ interface AgentPlanner {
     ): AgentStep
 }
 
-/** Remembers an action sequence that worked on a page, so a repeat visit need not pay for a round trip. */
-interface DecisionCache {
-    suspend fun suggest(goal: String, screen: ScreenSnapshot): List<ToolInvocation>?
-    suspend fun remember(goal: String, screen: ScreenSnapshot, invocations: List<ToolInvocation>)
-}
-
 /** Page observation and action dispatch. Implementations add their own safety checks. */
 interface AgentTools {
     val catalog: List<AgentToolSpec>
@@ -213,7 +207,6 @@ class AgentLoop(
     private val approval: ActionApproval,
     private val instructions: String,
     private val hook: AgentHook = NoHook,
-    private val cache: DecisionCache? = null,
     private val maxSteps: Int = 40,
     private val maxRepairs: Int = 2,
     private val retry: AgentRetryPolicy = AgentRetryPolicy(),
@@ -240,15 +233,14 @@ class AgentLoop(
     private var pending: List<ToolInvocation> = emptyList()
 
     private var step = 0
+    /** Start of the current step budget; explicit resume grants another bounded window. */
+    private var budgetStart = 0
     private var repairs = 0
-
-    /** Recent page fingerprints; a run of identical pages means nothing is happening. */
-    private val recentRevisions = ArrayDeque<String>()
 
     /** Last page text handed to the model, so an unchanged page is not repeated every step. */
     private var lastRenderedPage: String? = null
 
-    /** Hash of the last page the model actually saw; drives real stall detection. */
+    /** Hash of the last page the model actually saw; drives observation de-duplication. */
     private var lastPageFingerprint: String? = null
 
     /** True when the last observation had no actionable controls worth showing. */
@@ -260,16 +252,7 @@ class AgentLoop(
     /** Revision the graphical screenshot was already attached for, so it happens once per page. */
     private var graphicalShotRevision: String? = null
 
-    /**
-     * Fingerprints of recent screenshots. On a page with no accessibility tree the rendered text is
-     * always the same, so the only honest progress signal is whether the picture itself changed.
-     */
-    private val recentFrames = ArrayDeque<String>()
-
-    /** How many consecutive steps have reported "no progress"; drives the notice, then the stop. */
-    private var stallNotices = 0
-
-    /** Separate budget for action cycles, which are weaker evidence than a frozen page. */
+    /** Budget for repeated-action cycles. Page text/revision changes are too noisy to use here. */
     private var cycleNotices = 0
 
     /** Recent action signatures, used to spot an enter/back style cycle. */
@@ -294,6 +277,10 @@ class AgentLoop(
         if (text.isNotBlank()) {
             transcript += AgentMessage(AgentMessage.Role.USER, content = "老人的回答：${text.trim()}")
         }
+        // A question/answer is a conversation boundary: reset the action-cycle window so an old
+        // repeated pattern from before the pause cannot make the resumed work look like a loop.
+        cycleNotices = 0
+        recentActions.clear()
         return loop()
     }
 
@@ -328,15 +315,13 @@ class AgentLoop(
     private fun reset() {
         pending = emptyList()
         step = 0
+        budgetStart = 0
         repairs = 0
-        stallNotices = 0
         cycleNotices = 0
         recentActions.clear()
         fetched.clear()
         blindNoticeGiven = false
         screenshotFailures = 0
-        recentRevisions.clear()
-        recentFrames.clear()
         lastRenderedPage = null
         lastPageFingerprint = null
         lastScreenWasBlind = false
@@ -349,6 +334,9 @@ class AgentLoop(
     /** Continues a paused run from the same transcript. */
     suspend fun resume(): AgentOutcome {
         if (transcript.isEmpty()) return AgentOutcome.PAUSED("没有可以继续的事，请重新说出目标。")
+        // The step budget is a safety stop, not a permanent death sentence. A person explicitly
+        // choosing "continue" grants one more bounded budget; it does not make the budget infinite.
+        if (step - budgetStart >= maxSteps) budgetStart = step
         return loop()
     }
 
@@ -361,9 +349,9 @@ class AgentLoop(
                 execute(transcript.lastIndex, pending)?.let { return it }
             }
 
-            if (step >= maxSteps) {
+            if (step - budgetStart >= maxSteps) {
                 return AgentOutcome.STEP_LIMIT(
-                    "已经操作了${maxSteps}步还没有完成。您可以自己接着操作，或请家人帮忙。",
+                    "已经操作了${step}步还没有完成。您可以自己接着操作，或请家人帮忙。",
                 )
             }
 
@@ -463,8 +451,6 @@ class AgentLoop(
             }
             return
         }
-        recentFrames.addLast(shot.image.base64.length.toString() + ":" + shot.image.base64.hashCode())
-        while (recentFrames.size > STALL_WINDOW) recentFrames.removeFirst()
         if (lastScreenWasBlind) {
             transcript += AgentMessage(
                 AgentMessage.Role.USER,
@@ -611,91 +597,104 @@ class AgentLoop(
         var needsPersonReason: String? = null
         var question: String? = null
         var choices: List<String> = emptyList()
-        for (invocation in invocations) {
-            currentCoroutineContext().ensureActive()
+        try {
+            for (invocation in invocations) {
+                currentCoroutineContext().ensureActive()
 
-            // The model asking to hand over is a legitimate decision, not a failure.
-            if (invocation.tool == HANDOFF_TOOL) {
-                handoffReason = invocation.arguments["reason"].orEmpty().ifBlank { "这件事需要家人接手。" }
-                executed += invocation to ToolResult(true, "已经把这件事交给家人。")
-                continue
-            }
+                // The model asking to hand over is a legitimate decision, not a failure.
+                if (invocation.tool == HANDOFF_TOOL) {
+                    handoffReason = invocation.arguments["reason"].orEmpty().ifBlank { "这件事需要家人接手。" }
+                    executed += invocation to ToolResult(true, "已经把这件事交给家人。")
+                    continue
+                }
 
-            // So is concluding that the task cannot be done at all: better an honest "cannot"
-            // than a completion report the person will believe.
-            if (invocation.tool == IMPOSSIBLE_TOOL) {
-                impossibleReason = invocation.arguments["reason"].orEmpty().ifBlank { "这件事在手机上做不到。" }
-                executed += invocation to ToolResult(true, "已经记下这件事做不到。")
-                continue
-            }
+                // So is concluding that the task cannot be done at all: better an honest "cannot"
+                // than a completion report the person will believe.
+                if (invocation.tool == IMPOSSIBLE_TOOL) {
+                    impossibleReason = invocation.arguments["reason"].orEmpty().ifBlank { "这件事在手机上做不到。" }
+                    executed += invocation to ToolResult(true, "已经记下这件事做不到。")
+                    continue
+                }
 
-            // "You do this step yourself" and "answer my question" are different from handing the
-            // task to the family, and the person sees a different message for each.
-            if (invocation.tool == ASK_PERSON_TOOL) {
-                needsPersonReason = invocation.arguments["reason"].orEmpty()
-                    .ifBlank { "这一步需要您自己操作。" }
-                executed += invocation to ToolResult(true, "已经请老人自己完成这一步。")
-                continue
-            }
-            if (invocation.tool == ASK_USER_TOOL) {
-                question = invocation.arguments["question"].orEmpty().ifBlank { "请告诉我更多信息。" }
-                choices = parseOptions(invocation.arguments["options"].orEmpty())
-                executed += invocation to ToolResult(true, "已经向老人提问，等待回答。")
-                continue
-            }
+                // "You do this step yourself" and "answer my question" are different from handing the
+                // task to the family, and the person sees a different message for each.
+                if (invocation.tool == ASK_PERSON_TOOL) {
+                    needsPersonReason = invocation.arguments["reason"].orEmpty()
+                        .ifBlank { "这一步需要您自己操作。" }
+                    executed += invocation to ToolResult(true, "已经请老人自己完成这一步。")
+                    continue
+                }
+                if (invocation.tool == ASK_USER_TOOL) {
+                    question = invocation.arguments["question"].orEmpty().ifBlank { "请告诉我更多信息。" }
+                    choices = parseOptions(invocation.arguments["options"].orEmpty())
+                    executed += invocation to ToolResult(true, "已经向老人提问，等待回答。")
+                    continue
+                }
 
-            val spec = spec(invocation.tool)
-            if (spec == null) {
-                // A name we do not offer is a mistake, not an attack: reply with the real catalogue
-                // so the model can choose again, exactly as a bad parameter is handled. It still
-                // counts as a repair, so insisting on it eventually stops the run.
-                logger("unknown tool requested: ${invocation.tool}")
-                executed += invocation to ToolResult(
-                    false,
-                    "没有“${invocation.tool}”这个工具。可用的工具是：" +
-                        tools.catalog.joinToString("、") { it.name },
-                    "unknown_tool",
+                val spec = spec(invocation.tool)
+                if (spec == null) {
+                    // A name we do not offer is a mistake, not an attack: reply with the real catalogue
+                    // so the model can choose again, exactly as a bad parameter is handled. It still
+                    // counts as a repair, so insisting on it eventually stops the run.
+                    logger("unknown tool requested: ${invocation.tool}")
+                    executed += invocation to ToolResult(
+                        false,
+                        "没有“${invocation.tool}”这个工具。可用的工具是：" +
+                            tools.catalog.joinToString("、") { it.name },
+                        "unknown_tool",
+                    )
+                    continue
+                }
+
+                val key = invocation.tool + invocation.arguments.toSortedMap().toString()
+                if (spec.informational && key in fetched) {
+                    // Repeating a pure lookup adds nothing; say so and count it against the repair
+                    // budget so a model stuck in this loop is stopped instead of running to the limit.
+                    executed += invocation to ToolResult(
+                        false,
+                        "这个内容你在前面已经读过了，重复读取没有任何新进展。请按它说的去做，或说明卡在哪里。",
+                        "already_fetched",
+                    )
+                    continue
+                }
+                val repeated = alreadyRun[key]
+                if (repeated != null) {
+                    executed += invocation to ToolResult(
+                        repeated.success,
+                        "同一个操作已经在这次请求里做过，跳过重复。",
+                        "duplicate_skipped",
+                    )
+                    continue
+                }
+                val call = resolveCoordinates(invocation, observed)
+                val invalid = validate(spec, invocation)
+                val result = if (invalid != null) {
+                    ToolResult(false, "参数无效：$invalid，请根据工具目录修正。", invalid)
+                } else {
+                    hook.onAction(describe(invocation))
+                    tools.execute(call)
+                }
+                alreadyRun[key] = result
+                if (spec.informational && result.success) fetched += key
+                executed += invocation to result
+                executedCalls += ExecutedCall(
+                    tool = invocation.tool,
+                    argument = invocation.arguments.values.joinToString(" "),
+                    success = result.success,
+                    atMillis = System.currentTimeMillis(),
                 )
-                continue
             }
-
-            val key = invocation.tool + invocation.arguments.toSortedMap().toString()
-            if (spec.informational && key in fetched) {
-                // Repeating a pure lookup adds nothing; say so and count it against the repair
-                // budget so a model stuck in this loop is stopped instead of running to the limit.
-                executed += invocation to ToolResult(
-                    false,
-                    "这个内容你在前面已经读过了，重复读取没有任何新进展。请按它说的去做，或说明卡在哪里。",
-                    "already_fetched",
-                )
-                continue
+        } catch (cancelled: CancellationException) {
+            // A stop in the middle of a batch is never allowed to leave a partial model transcript
+            // or to replay the actions that already happened. Keep completed results, mark the
+            // rest cancelled, clear the pending queue, and let a later resume re-plan from the page.
+            pending = emptyList()
+            val completed = executed.map { it.second }
+            val cancelledResults = invocations.drop(completed.size).map {
+                ToolResult(false, "用户已停止，这一步未执行。", "cancelled")
             }
-            val repeated = alreadyRun[key]
-            if (repeated != null) {
-                executed += invocation to ToolResult(
-                    repeated.success,
-                    "同一个操作已经在这次请求里做过，跳过重复。",
-                    "duplicate_skipped",
-                )
-                continue
-            }
-            val call = resolveCoordinates(invocation, observed)
-            val invalid = validate(spec, invocation)
-            val result = if (invalid != null) {
-                ToolResult(false, "参数无效：$invalid，请根据工具目录修正。", invalid)
-            } else {
-                hook.onAction(describe(invocation))
-                tools.execute(call)
-            }
-            alreadyRun[key] = result
-            if (spec.informational && result.success) fetched += key
-            executed += invocation to result
-            executedCalls += ExecutedCall(
-                tool = invocation.tool,
-                argument = invocation.arguments.values.joinToString(" "),
-                success = result.success,
-                atMillis = System.currentTimeMillis(),
-            )
+            appendResults(invocations, completed + cancelledResults)
+            throw cancelled
         }
         pending = emptyList()
 
@@ -713,65 +712,26 @@ class AgentLoop(
         // clears it, otherwise two unrelated hiccups would end an otherwise healthy run.
         repairs = if (results.all { it.success }) 0 else repairs + results.count { it.code in REPAIRABLE_CODES }
 
-        // Judge progress by the page itself, not by the tool's own claim: a no-op call such as
-        // wait() must not look like progress, or an agent that only observes never stops.
-        val observedAfter = tools.observe()
-        val fingerprint = renderScreen(observedAfter).hashCode().toString(16)
-        // With a tree, compare the rendered page. Without one, compare the actual screenshots.
-        // Both a single repeated page and a small cycle of pages (open -> back -> open) mean the run
-        // is not advancing; only checking "identical" missed the cycle entirely, because every step
-        // in it changes the page and every action succeeds.
-        // Only steps that were supposed to change the page count towards "no progress": fetching a
-        // fact (current_time, load_skill) or taking a screenshot cannot move the page, and treating
-        // those as stalls killed perfectly healthy runs.
+        // Do not infer progress from a page fingerprint. Real apps such as Meituan animate,
+        // recalculate distances/prices and rotate promotions, so rendered text or revision values
+        // can repeat even while the task is genuinely moving forward. The only automatic loop signal
+        // here is a repeated action pattern plus the step limit.
         val observational = executed.all { (invocation, _) ->
             spec(invocation.tool)?.informational == true ||
-                invocation.tool == "screenshot" || invocation.tool == "wait"
+                invocation.tool == "screenshot" || invocation.tool == "wait" ||
+                // These are conversation hand-offs, not page-progress actions.
+                invocation.tool == "ask_user" || invocation.tool == "ask_person" ||
+                invocation.tool == "handoff" || invocation.tool == "impossible"
         }
-        val window = if (observedAfter.elements.isEmpty()) recentFrames else recentRevisions
-        var frozen = false
-        var cycling = false
-        if (!observational) {
-            // Only action steps belong in the window; a lookup would otherwise fill it with the same
-            // page and make the next real action look stalled.
-            if (observedAfter.elements.isEmpty()) {
-                // A page with no tree renders to the same text every step, so pushing it here would
-                // fill the window with a constant and hide real oscillation. The picture is the only
-                // honest signal on such pages, and it is pushed when a screenshot is captured.
-            } else {
-                recentRevisions.addLast(fingerprint)
-                while (recentRevisions.size > STALL_WINDOW) recentRevisions.removeFirst()
-            }
-            val distinctPages = window.distinct().size
-            // "Keeps coming back to a page it has already been on" is the shape of every loop seen
-            // on a page we cannot read: open something, back out, open the same place again. It does
-            // not repeat exactly, so a period check misses it.
-            val revisits = window.groupingBy { it }.eachCount().values.count { it >= 2 }
-            frozen = window.size >= STALL_WINDOW && distinctPages == 1
-            cycling = window.size >= STALL_WINDOW && distinctPages == 2
-            if (window.size >= STALL_WINDOW && distinctPages in 3..STALL_WINDOW && revisits >= 1) {
-                cycling = true
-            }
-        }
-        // A cycle of actions ("enter, back, enter, back") is a loop even when every page differs,
-        // which page fingerprints cannot see. Only periods 2 and 3 count: repeating one action
-        // (holding backspace, paging down) is legitimate.
-        // Signatures use tool names only: an "enter -> back" loop usually varies its arguments
-        // (a different cell each time), so matching arguments would miss exactly the case we want.
+        // A cycle of actions ("enter, back, enter, back") is a loop even when every page differs.
+        // Only periods 2 and 3 count: repeating one action (holding backspace, paging down) is
+        // legitimate. Signatures use tool names only, because enter/back loops often vary arguments.
         val signature = executed.joinToString("|") { (call, _) -> call.tool }
         if (!observational) {
             recentActions.addLast(signature)
             while (recentActions.size > ACTION_WINDOW) recentActions.removeFirst()
         }
         val actionCycle = !observational && isCyclic(recentActions)
-
-        if (frozen || cycling) {
-            stallNotices += 1
-        } else if (!observational) {
-            stallNotices = 0
-        }
-        // A cycle is weaker evidence than a frozen page: legitimate work is often periodic
-        // (filling several fields, going through several items), so it gets its own budget.
         if (actionCycle) cycleNotices += 1 else cycleNotices = 0
 
         return when {
@@ -787,38 +747,18 @@ class AgentLoop(
                 )
             repairs >= maxRepairs ->
                 AgentOutcome.PAUSED("这一步总是做不成，已停下。您可以自己操作，或请家人帮忙。")
-            // Getting nowhere is information the model does not have. Tell it and let it choose a
-            // different approach; the loop only stops if it stays stuck after being told.
-            stallNotices >= STALL_NOTICE_LIMIT -> AgentOutcome.STUCK(
-                "页面一直没有变化，我已经停了。您可以自己点一下，或请家人帮忙。",
-            )
             cycleNotices >= CYCLE_NOTICE_LIMIT -> AgentOutcome.STUCK(
                 "它在重复同样的几步操作，没有进展，我已经停了。",
             )
             actionCycle -> {
                 transcript += AgentMessage(
                     AgentMessage.Role.USER,
-                    content = "（系统提示：你最近在重复同样的几步操作，并且回到了相似的地方。" +
+                    content = "（系统提示：你最近在重复同样的几步操作。" +
                         "如果这是有意的（比如逐个填表、逐个处理条目），继续做就行；" +
                         "但如果你想看清整页内容而它不在文字里（课表、图表、图片），" +
                         "请直接用 screenshot 看，不要靠一个个点进去探索。）",
                 )
                 hook.onWarning("在重复进入又退出的循环，正在提醒它换路。")
-                null
-            }
-            frozen || cycling -> {
-                transcript += AgentMessage(
-                    AgentMessage.Role.USER,
-                    content = if (cycling) {
-                        "（系统提示：你已经在同样的两三个页面之间来回进出 ${window.size} 次，没有进展。" +
-                            "请停下来想清楚：要么换一条完全不同的路径，要么直接说明卡在哪里，" +
-                            "或者用 handoff 交给家人。）"
-                    } else {
-                        "（系统提示：已经连续 ${window.size} 步没有让页面发生变化，这样下去办不成。" +
-                            "请换一种做法：滚动、返回、用搜索，或者直接说明你卡在哪里。）"
-                    },
-                )
-                hook.onWarning(if (cycling) "在几个页面之间来回切换，正在提醒它换路。" else "页面一直没有变化，正在换办法。")
                 null
             }
             else -> null
@@ -899,14 +839,23 @@ class AgentLoop(
     /** `tap_xy` carries fractions of the screen; convert them to the pixels the service expects. */
     private fun resolveCoordinates(invocation: ToolInvocation, screen: ScreenSnapshot): ToolCall {
         val call = toCall(invocation, screen)
-        if (invocation.tool != "tap_xy") return call
-        val fx = invocation.arguments["x"]?.toFloatOrNull()?.coerceIn(0f, 1f) ?: 0.5f
-        val fy = invocation.arguments["y"]?.toFloatOrNull()?.coerceIn(0f, 1f) ?: 0.5f
-        val width = screen.width.takeIf { it > 0 } ?: 1080
-        val height = screen.height.takeIf { it > 0 } ?: 2400
-        val x = (fx * width).toInt()
-        val y = (fy * height).toInt()
-        return call.copy(name = "tap", x = x, y = y, endX = x, endY = y)
+        if (invocation.tool == "tap_xy") {
+            val fx = invocation.arguments["x"]?.toFloatOrNull()?.coerceIn(0f, 1f) ?: 0.5f
+            val fy = invocation.arguments["y"]?.toFloatOrNull()?.coerceIn(0f, 1f) ?: 0.5f
+            val width = screen.width.takeIf { it > 0 } ?: 1080
+            val height = screen.height.takeIf { it > 0 } ?: 2400
+            val x = (fx * width).toInt()
+            val y = (fy * height).toInt()
+            return call.copy(name = "tap", x = x, y = y, endX = x, endY = y)
+        }
+        // Remember what the chosen id looked like. The service re-observes before dispatch; without
+        // this identity, an id that still exists after the page changed could point at a new control.
+        val target = invocation.arguments["target"].orEmpty()
+        val element = screen.elements.find { it.id == target }
+        val expected = element?.let {
+            it.text.ifBlank { it.description }.ifBlank { "bounds:${it.bounds}" }
+        }.orEmpty()
+        return if (expected.isBlank()) call else call.copy(expected = expected)
     }
 
     /**
@@ -934,17 +883,11 @@ class AgentLoop(
     }
 
     private companion object {
-        /** How many consecutive identical pages mean we are not getting anywhere. */
-        const val STALL_WINDOW = 4
-
         /** How many recent action signatures to keep when looking for a cycle. */
         const val ACTION_WINDOW = 12
 
-        /** Cycle warnings before giving up; deliberately larger than the frozen-page budget. */
-        const val CYCLE_NOTICE_LIMIT = 4
-
-        /** After this many consecutive no-progress steps (each one already warned), stop. */
-        const val STALL_NOTICE_LIMIT = 3
+        /** Cycle warnings before giving up. Single-action repeats are left to the step limit. */
+        const val CYCLE_NOTICE_LIMIT = 5
 
         /** Give up on screenshots after this many consecutive refusals. */
         const val SCREENSHOT_FAILURE_LIMIT = 2

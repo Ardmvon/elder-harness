@@ -37,10 +37,17 @@ object OutcomeCheck {
 
     private val TEXT_ENTRY = setOf("input_text", "paste_text", "type_text")
 
-    /** Tools that can change something outside the run itself. */
+    /**
+     * Actions that can produce an effect outside this run. Navigation-only tools such as
+     * `back`, `home`, `open_app` and `wait` are deliberately absent: pressing them cannot be
+     * evidence that a message was sent or an order was placed.
+     *
+     * `scroll`/`swipe` stay because a slider is adjusted through the scroll action on this
+     * platform; the backstop is the claim-specific text/time check above.
+     */
     private val STATE_CHANGING = setOf(
-        "click", "tap_text", "tap_xy", "long_press", "input_text", "paste_text", "type_text",
-        "swipe", "scroll", "set_slider", "open_app", "back", "home",
+        "click", "tap_text", "tap_xy", "tap", "long_press", "input_text", "paste_text", "type_text",
+        "swipe", "scroll", "set_slider",
     )
 
     /**
@@ -83,10 +90,13 @@ object OutcomeCheck {
             .toList()
         if (quoted.isNotEmpty()) {
             val typed = successful.filter { it.tool in TEXT_ENTRY }.joinToString(" ") { it.argument }
-            val traceable = quoted.any { fragment -> typed.contains(fragment) }
-            if (!traceable) {
+            // The produced text is normally the longest quoted fragment; a shorter quote may be
+            // a recipient or button label. Requiring every fragment would reject honest sentences
+            // such as "已发送「我到家了」给「女儿」", so check the strongest piece of evidence.
+            val evidence = quoted.maxByOrNull { it.length }
+            if (evidence == null || !typed.contains(evidence)) {
                 return OutcomeVerdict.Unsupported(
-                    "声明里引用的文字（「${quoted.first()}」）不是这一次输入进去的，" +
+                    "声明里引用的文字（「${evidence ?: quoted.first()}」）不是这一次输入进去的，" +
                         "可能是屏幕上本来就有的内容",
                 )
             }

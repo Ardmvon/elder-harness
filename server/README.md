@@ -16,7 +16,7 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 测试：
 
 ```bash
-cd server && .venv/bin/python -m pytest tests -q      # 14 项
+cd server && .venv/bin/python -m pytest tests -q      # 28 项
 ```
 
 环境变量（都有默认值，测试会覆盖）：
@@ -26,6 +26,7 @@ cd server && .venv/bin/python -m pytest tests -q      # 14 项
 | `HOTLINE_DB` | `server/hotline.db` | SQLite 文件位置 |
 | `HOTLINE_HEARTBEAT_SECONDS` | 300 | 手机应多久报到一次 |
 | `HOTLINE_SILENCE_SECONDS` | 21600（6 小时）| 安静多久算异常，通知圈子 |
+| `HOTLINE_PAIR_TTL_SECONDS` | 3600（1 小时）| 配对码有效期；过期后在老人手机上重新配对 |
 
 ## 接口
 

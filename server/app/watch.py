@@ -45,8 +45,11 @@ def check_silence(
     now = now if now is not None else time.time()
     raised = []
     for device in silent_devices(now, silence_seconds):
-        already = any(event["kind"] == "alert" for event in db.open_help_events(device["id"]))
-        if already:
+        # An alert that was created after the phone's last contact belongs to this same silence
+        # episode, even if the family has already claimed it. A later heartbeat moves last_seen_at
+        # past that alert, so a genuinely new silence can raise again.
+        last_alert = db.latest_alert_at(device["id"])
+        if last_alert is not None and last_alert > (device["last_seen_at"] or 0):
             continue
         hours = device["silent_seconds"] // 3600
         minutes = (device["silent_seconds"] % 3600) // 60

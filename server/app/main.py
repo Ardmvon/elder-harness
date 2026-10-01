@@ -20,12 +20,18 @@ import logging
 import os
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 from fastapi import Body, Cookie, FastAPI, Form, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
-from . import db, notify, speech, watch, web
+from . import load_env
+
+# Configuration is read at import time; load .env before importing modules that snapshot it.
+load_env(str(Path(__file__).resolve().parent.parent / ".env"))
+
+from . import db, notify, speech, watch, web  # noqa: E402
 
 log = logging.getLogger("hotline")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -40,10 +46,6 @@ SILENCE_SECONDS = int(os.environ.get("HOTLINE_SILENCE_SECONDS", str(watch.DEFAUL
 async def lifespan(app: FastAPI):
     import asyncio
 
-    # Credentials for the model and for speech live here, never in the phone.
-    from . import load_env
-
-    load_env(os.path.join(os.path.dirname(__file__), "..", ".env"))
     db.init()
     task = asyncio.create_task(watch.run_forever(interval_seconds=300, silence_seconds=SILENCE_SECONDS))
     try:
@@ -153,7 +155,13 @@ async def transcribe(
 ) -> dict[str, Any]:
     """Raw 16 kHz mono PCM16 in the body, text out. The phone records; the server holds the keys."""
     device = device_from_auth(authorization)
-    pcm = await request.body()
+    max_bytes = speech.SAMPLE_RATE * 2 * speech.MAX_AUDIO_SECONDS
+    pcm = bytearray()
+    async for chunk in request.stream():
+        pcm.extend(chunk)
+        if len(pcm) > max_bytes:
+            raise HTTPException(status_code=413, detail="语音数据过大")
+    pcm = bytes(pcm)
     if len(pcm) < speech.SAMPLE_RATE:  # under ~30ms of audio is a mis-tap, not a sentence
         return {"text": ""}
     try:
@@ -201,6 +209,7 @@ def index(session: str | None = Cookie(default=None)):
 
 @app.post("/join")
 def join(
+    request: Request,
     pair_code: str = Form(...),
     name: str = Form(...),
     phone: str = Form(default=""),
@@ -222,7 +231,14 @@ def join(
     session = db.create_session(member["id"])
     log.info("[join] device=%s member=%s role=%s", device["id"], clean_name, role)
     response = RedirectResponse("/family", status_code=303)
-    response.set_cookie("session", session, httponly=True, samesite="lax", max_age=60 * 60 * 24 * 365)
+    response.set_cookie(
+        "session",
+        session,
+        httponly=True,
+        secure=request.url.scheme == "https",
+        samesite="lax",
+        max_age=60 * 60 * 24 * 365,
+    )
     return response
 
 
@@ -254,8 +270,8 @@ def claim(event_id: int, session: str | None = Cookie(default=None)):
     member = member_from_cookie(session)
     if not member:
         return RedirectResponse("/", status_code=303)
-    event = db.claim_event(event_id, member["id"])
-    if not event or event["device_id"] != member["device_id"]:
+    event = db.claim_event(event_id, member["id"], member["device_id"])
+    if not event:
         return RedirectResponse("/family?ok=这条求助已经有人接手了", status_code=303)
     db.add_event(
         member["device_id"],
@@ -297,8 +313,15 @@ def trigger_watch(authorization: str | None = Header(default=None)) -> dict[str,
 
 
 @app.get("/api/devices/{device_id}/summary")
-def summary(device_id: int) -> JSONResponse:
-    """A small read-only view, useful while building the app side."""
+def summary(
+    device_id: int,
+    session: str | None = Cookie(default=None),
+) -> JSONResponse:
+    """A small read-only view for the circle member paired with this device."""
+    member = member_from_cookie(session)
+    if not member or member["device_id"] != device_id:
+        # 404 (not 403) avoids confirming which device ids exist.
+        raise HTTPException(status_code=404, detail="没有这个设备")
     with db.db() as connection:
         row = connection.execute("SELECT * FROM devices WHERE id = ?", (device_id,)).fetchone()
     if not row:

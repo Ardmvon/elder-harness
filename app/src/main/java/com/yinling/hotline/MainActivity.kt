@@ -23,10 +23,10 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Mic
@@ -114,6 +114,7 @@ class MainActivity : ComponentActivity() {
             }
             // One conversation, owned by the session: this screen only reflects it.
             val voiceState by session.voice.state.collectAsState()
+            val speaking by session.speaking.collectAsState()
             val listening = voiceState != VoiceSession.State.OFF
             val transcribing = voiceState == VoiceSession.State.TRANSCRIBING
             // A phone can claim to have a speech recogniser and still fail to start it; once that has
@@ -170,6 +171,7 @@ class MainActivity : ComponentActivity() {
                             canListen = canListen,
                             listening = listening,
                             transcribing = transcribing,
+                            speaking = speaking,
                             onListen = {
                                 if (
                                     checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) !=
@@ -239,6 +241,8 @@ class MainActivity : ComponentActivity() {
                             },
                             onSettings = { settings = true },
                             onFinish = session::finish,
+                            onStop = session::stop,
+                            onConfirm = session::answer,
                             answer = answer,
                             onAnswerChange = { answer = it },
                             onAnswer = { text ->
@@ -305,6 +309,7 @@ private fun HomePage(
     canListen: Boolean,
     listening: Boolean,
     transcribing: Boolean,
+    speaking: Boolean,
     onListen: () -> Unit,
     onOverlayPermission: () -> Unit,
     onAccessPermission: () -> Unit,
@@ -315,6 +320,8 @@ private fun HomePage(
     onCall: () -> Unit,
     onSettings: () -> Unit,
     onFinish: () -> Unit,
+    onStop: () -> Unit,
+    onConfirm: (Boolean) -> Unit,
     onRestore: (String) -> Unit,
     onDismissCircleMessage: () -> Unit,
     onConfirmSuccess: () -> Unit,
@@ -358,8 +365,9 @@ private fun HomePage(
                 state.phase == TaskPhase.CANNOT
             val circleCaption = when {
                 circleMessage != null -> "知道了"
-                listening -> "正在听…"
+                speaking -> "我在说…"
                 transcribing -> "正在听懂…"
+                listening -> "正在听…"
                 busy -> "停下来"
                 state.phase == TaskPhase.COMPLETED -> "知道了"
                 resumable -> "接着办"
@@ -368,8 +376,9 @@ private fun HomePage(
             }
             val circleHint = when {
                 circleMessage != null -> "点一下表示您看到了"
-                listening -> "说完就停，或再点一下"
+                speaking -> "直接开口，我会停下来听"
                 transcribing -> "稍等一下"
+                listening -> "说完就停，或再点一下"
                 busy -> "正在办事，点一下就停"
                 state.phase == TaskPhase.COMPLETED -> "这件事办好了"
                 resumable -> "上次这件事还没办完"
@@ -389,7 +398,7 @@ private fun HomePage(
                     busy -> Icons.Default.Close
                     listening || transcribing -> Icons.Default.Mic
                     state.phase == TaskPhase.COMPLETED -> Icons.Default.Check
-                    resumable -> Icons.Default.KeyboardArrowRight
+                    resumable -> Icons.AutoMirrored.Filled.KeyboardArrowRight
                     canListen || voiceAvailable -> Icons.Default.Mic
                     else -> Icons.Default.Edit
                 },
@@ -398,7 +407,7 @@ private fun HomePage(
                         circleMessage != null -> onDismissCircleMessage()
                         listening -> onListen()
                         transcribing -> Unit
-                        busy -> onFinish()
+                        busy -> onStop()
                         state.phase == TaskPhase.COMPLETED -> onFinish()
                         resumable -> onResumeTask()
                         canListen -> onListen()
@@ -409,6 +418,15 @@ private fun HomePage(
             )
 
             Spacer(Modifier.height(Elder.gap))
+
+            // A quiet fallback only when the page has room: no current task, no family message.
+            // The person asked for this once; it should not take over the one-button home screen.
+            val unfinished = history.firstOrNull { it.unfinished }
+            if (circleMessage == null && !hasTask && unfinished != null) {
+                TextButton(onClick = { onRestore(unfinished.id) }) {
+                    Text("上次没办完的事", fontSize = Elder.hint, color = Elder.inkSoft)
+                }
+            }
 
             // Cards appear only when the person actually has a decision to make. A family message
             // replaces the task card until it is acknowledged, but does not disturb the task itself.
@@ -433,6 +451,12 @@ private fun HomePage(
                     ElderPrimaryButton("知道了", onDismissCircleMessage)
                 }
 
+                state.phase == TaskPhase.CONFIRMING -> ElderCard {
+                    Text(state.message, fontSize = Elder.body)
+                    ElderPrimaryButton("确认", { onConfirm(true) })
+                    ElderSecondaryButton("取消", { onConfirm(false) })
+                }
+
                 state.phase == TaskPhase.ASKING -> ElderCard {
                     Text(state.goal, fontSize = Elder.hint, color = Elder.inkSoft)
                     Text(state.message, fontSize = Elder.body)
@@ -452,7 +476,7 @@ private fun HomePage(
                     state.phase == TaskPhase.CANNOT -> ElderCard {
                     Text(state.message, fontSize = Elder.body)
                     ElderPrimaryButton("我做好了，继续", onResumeTask)
-                    ElderSecondaryButton("停下来", onFinish)
+                    ElderSecondaryButton("停下来", onStop)
                 }
 
                 state.phase == TaskPhase.COMPLETED -> ElderCard {
@@ -603,7 +627,7 @@ private fun SettingsPage(session: SessionController, onBack: () -> Unit) {
             Text("允许请求屏幕图像", fontSize = 17.sp)
             Switch(checked = vision, onCheckedChange = { vision = it })
         }
-        Text("仅在模型支持图片时开启。每次截图发送前会请您确认。", fontSize = 14.sp)
+        Text("仅在模型支持图片时开启。开启后，盲页面会自动把当前屏幕图像发给该模型。", fontSize = 14.sp)
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
             Text("开发者模式", fontSize = 17.sp)
             Switch(checked = developer, onCheckedChange = { developer = it })
@@ -720,7 +744,7 @@ private fun KeepAliveSection() {
 @Composable
 private fun PeaceSection() {
     val context = LocalContext.current
-    val peace = remember { PeaceCheck(context) }
+    val peace = remember { (context.applicationContext as HotlineApp).peace }
     var tick by remember { mutableIntStateOf(0) }
     var enabled by remember { mutableStateOf(peace.enabled) }
     var who by remember { mutableStateOf(peace.who) }
@@ -905,7 +929,7 @@ private fun ServerSection() {
         )
         OutlinedTextField(
             address, { address = it },
-            label = { Text("服务器地址（如 http://192.168.1.5:8787）") },
+            label = { Text("服务器地址（HTTPS；本地 adb reverse 用 http://127.0.0.1:8787）") },
             modifier = Modifier.fillMaxWidth(),
         )
         OutlinedButton(
@@ -923,12 +947,20 @@ private fun ServerSection() {
         ) { Text(if (busy) "正在配对…" else "配对 / 重新配对") }
 
         if (server.pairCode.isNotBlank()) {
+            val familyUrl = server.familyUrl()
             Text("配对码", fontSize = 16.sp)
             Text(server.pairCode, fontSize = 34.sp, fontWeight = FontWeight.Bold)
             Text(
-                "让家人在手机浏览器打开 ${server.familyUrl()}，输入这个配对码，选自己的身份（家人/社区/邻居）。",
+                "让家人在手机浏览器打开 $familyUrl，输入这个配对码，选自己的身份（家人/社区/邻居）。",
                 fontSize = 15.sp,
             )
+            if (familyUrl.contains("127.0.0.1") || familyUrl.contains("localhost") || familyUrl.contains("::1")) {
+                Text(
+                    "这个地址只适合本机联调；家人远程打开网页，请改成服务器电脑可被访问的 HTTPS 地址。",
+                    fontSize = 14.sp,
+                    color = Color(0xFFC46A14),
+                )
+            }
         }
         Text(remember(tick) { server.lastResult.ifBlank { "还没联系过服务器" } }, fontSize = 15.sp)
         Text(

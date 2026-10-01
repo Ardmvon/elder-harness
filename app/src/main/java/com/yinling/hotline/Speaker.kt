@@ -1,7 +1,12 @@
 package com.yinling.hotline
 
+import android.os.Handler
+import android.os.Looper
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import java.util.Locale
 
 /**
@@ -32,6 +37,11 @@ class Speaker(private val app: HotlineApp) {
     var isSpeaking: Boolean = false
         private set
 
+    private val mutableSpeaking = MutableStateFlow(false)
+
+    /** UI-facing version of [isSpeaking], so Compose and the overlay can redraw. */
+    val speaking: StateFlow<Boolean> = mutableSpeaking.asStateFlow()
+
     /** Called when speech starts or stops. The listener may arrive on a TTS binder thread. */
     var onSpeakingChanged: ((Boolean) -> Unit)? = null
 
@@ -39,6 +49,11 @@ class Speaker(private val app: HotlineApp) {
     @Volatile
     private var currentUtterance: String? = null
     private var utteranceSerial = 0
+
+    /** Fallback so a ROM that forgets onDone cannot leave the UI stuck on "speaking" forever. */
+    private val handler = Handler(Looper.getMainLooper())
+    @Volatile
+    private var speakingTimeout: Runnable? = null
 
     /** On by default: the people this is for are the least likely to go looking for the switch. */
     var enabled: Boolean
@@ -73,22 +88,22 @@ class Speaker(private val app: HotlineApp) {
 
                 override fun onDone(utteranceId: String?) {
                     LoopLog.event("[speak] 朗读完成")
-                    if (utteranceId == currentUtterance) setSpeaking(false)
+                    finishSpeaking(utteranceId)
                 }
 
                 @Deprecated("older signature is still the one that fires on some ROMs")
                 override fun onError(utteranceId: String?) {
                     LoopLog.event("[speak] 朗读失败")
-                    if (utteranceId == currentUtterance) setSpeaking(false)
+                    finishSpeaking(utteranceId)
                 }
 
                 override fun onError(utteranceId: String?, errorCode: Int) {
                     LoopLog.event("[speak] 朗读失败 code=$errorCode")
-                    if (utteranceId == currentUtterance) setSpeaking(false)
+                    finishSpeaking(utteranceId)
                 }
 
                 override fun onStop(utteranceId: String?, interrupted: Boolean) {
-                    if (utteranceId == currentUtterance) setSpeaking(false)
+                    finishSpeaking(utteranceId)
                 }
             })
             LoopLog.event("[speak] 使用引擎：$engineName")
@@ -137,12 +152,33 @@ class Speaker(private val app: HotlineApp) {
         if (clean.isBlank()) return
         val utterance = "hotline_${++utteranceSerial}"
         currentUtterance = utterance
+        // Do not wait for onStart: some engines are late, and the UI should show "speaking" as
+        // soon as we hand the line to TTS. The timeout is the safety net if no callback arrives.
+        setSpeaking(true)
+        speakingTimeout?.let { handler.removeCallbacks(it) }
+        val timeout = Runnable {
+            if (currentUtterance == utterance) {
+                LoopLog.event("[speak] 朗读回调超时，强制结束状态")
+                setSpeaking(false)
+                speakingTimeout = null
+            }
+        }
+        speakingTimeout = timeout
+        handler.postDelayed(timeout, MAX_SPEAK_MS)
         engine?.speak(clean.take(240), TextToSpeech.QUEUE_FLUSH, null, utterance)
+    }
+
+    private fun finishSpeaking(utteranceId: String?) {
+        if (utteranceId != currentUtterance) return
+        speakingTimeout?.let { handler.removeCallbacks(it) }
+        speakingTimeout = null
+        setSpeaking(false)
     }
 
     private fun setSpeaking(speaking: Boolean) {
         if (isSpeaking == speaking) return
         isSpeaking = speaking
+        mutableSpeaking.value = speaking
         onSpeakingChanged?.invoke(speaking)
     }
 
@@ -153,14 +189,23 @@ class Speaker(private val app: HotlineApp) {
         else -> "这台手机的语音引擎没能启动，可在系统设置→无障碍→文字转语音里选一个"
     }
 
+    private companion object {
+        /** Longest reasonable line is 240 characters; 90s is a generous callback fallback. */
+        const val MAX_SPEAK_MS = 90_000L
+    }
+
     fun stop() {
         currentUtterance = null
+        speakingTimeout?.let { handler.removeCallbacks(it) }
+        speakingTimeout = null
         engine?.stop()
         setSpeaking(false)
     }
 
     fun release() {
         currentUtterance = null
+        speakingTimeout?.let { handler.removeCallbacks(it) }
+        speakingTimeout = null
         engine?.shutdown()
         engine = null
         ready = false

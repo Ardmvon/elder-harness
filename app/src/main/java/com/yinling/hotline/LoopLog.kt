@@ -4,9 +4,8 @@ import android.content.Context
 import android.util.Log
 import com.yinling.core.AgentMessage
 import java.io.File
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
+import java.time.LocalTime
+import java.time.format.DateTimeFormatter
 
 /**
  * Developer diagnostics: every decision, tool call and observation in one append-only file.
@@ -25,7 +24,8 @@ object LoopLog {
     @Volatile
     var enabled: Boolean = false
 
-    private val stamp = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
+    private val stamp = DateTimeFormatter.ofPattern("HH:mm:ss.SSS")
+    private val fileLock = Any()
 
     fun attach(context: Context) {
         appContext = context.applicationContext
@@ -36,10 +36,13 @@ object LoopLog {
         Log.d(TAG, message)
         if (!enabled) return
         val context = appContext ?: return
+        val line = "${LocalTime.now().format(stamp)} $message\n"
         runCatching {
-            val file = File(context.filesDir, FILE_NAME)
-            if (file.length() > MAX_BYTES) file.writeText("")
-            file.appendText("${stamp.format(Date())} $message\n")
+            synchronized(fileLock) {
+                val file = File(context.filesDir, FILE_NAME)
+                if (file.length() > MAX_BYTES) file.writeText("")
+                file.appendText(line)
+            }
         }
     }
 

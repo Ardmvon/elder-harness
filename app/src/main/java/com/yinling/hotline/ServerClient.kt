@@ -41,9 +41,15 @@ class ServerClient(private val app: HotlineApp) {
         }
 
     /** Kept encrypted: it is the credential that lets this phone post events. */
+    private var cachedToken: String? = null
     var token: String
-        get() = SecretStore.load(app, SecretStore.DEVICE_TOKEN)
-        set(value) = SecretStore.save(app, value, SecretStore.DEVICE_TOKEN)
+        get() = cachedToken ?: SecretStore.load(app, SecretStore.DEVICE_TOKEN)
+            .also { cachedToken = it }
+        set(value) {
+            val trimmed = value.trim()
+            cachedToken = trimmed
+            SecretStore.save(app, trimmed, SecretStore.DEVICE_TOKEN)
+        }
 
     var pairCode: String
         get() = prefs.getString("pair_code", "").orEmpty()

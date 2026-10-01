@@ -16,12 +16,15 @@ from contextlib import contextmanager
 from typing import Any, Iterator
 
 DB_PATH = os.environ.get("HOTLINE_DB", os.path.join(os.path.dirname(__file__), "..", "hotline.db"))
+# A pairing code is a setup secret, not a permanent password. The phone can always re-pair.
+PAIR_CODE_TTL_SECONDS = int(os.environ.get("HOTLINE_PAIR_TTL_SECONDS", "3600"))
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS devices (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     token         TEXT NOT NULL UNIQUE,
     pair_code     TEXT NOT NULL UNIQUE,
+    pair_code_expires_at REAL NOT NULL,
     elder_name    TEXT NOT NULL DEFAULT '',
     created_at    REAL NOT NULL,
     last_seen_at  REAL,
@@ -74,6 +77,7 @@ def connect() -> sqlite3.Connection:
     connection = sqlite3.connect(DB_PATH, check_same_thread=False)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA journal_mode=WAL")
+    connection.execute("PRAGMA foreign_keys=ON")
     return connection
 
 
@@ -90,6 +94,15 @@ def init(path: str | None = None) -> None:
             connection.execute("ALTER TABLE events ADD COLUMN delivered_at REAL")
         if "read_at" not in columns:
             connection.execute("ALTER TABLE events ADD COLUMN read_at REAL")
+        device_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(devices)").fetchall()
+        }
+        if "pair_code_expires_at" not in device_columns:
+            connection.execute("ALTER TABLE devices ADD COLUMN pair_code_expires_at REAL")
+            connection.execute(
+                "UPDATE devices SET pair_code_expires_at = created_at + ?",
+                (PAIR_CODE_TTL_SECONDS,),
+            )
 
 
 @contextmanager
@@ -118,8 +131,10 @@ def create_device(elder_name: str) -> dict[str, Any]:
             code = new_pair_code()
             try:
                 cursor = connection.execute(
-                    "INSERT INTO devices (token, pair_code, elder_name, created_at) VALUES (?,?,?,?)",
-                    (new_token(), code, elder_name, time.time()),
+                    "INSERT INTO devices "
+                    "(token, pair_code, pair_code_expires_at, elder_name, created_at) "
+                    "VALUES (?,?,?,?,?)",
+                    (new_token(), code, time.time() + PAIR_CODE_TTL_SECONDS, elder_name, time.time()),
                 )
             except sqlite3.IntegrityError:
                 continue
@@ -137,7 +152,8 @@ def device_by_token(token: str) -> dict[str, Any] | None:
 def device_by_pair_code(code: str) -> dict[str, Any] | None:
     with db() as connection:
         row = connection.execute(
-            "SELECT * FROM devices WHERE pair_code = ?", (code.strip().upper(),)
+            "SELECT * FROM devices WHERE pair_code = ? AND pair_code_expires_at > ?",
+            (code.strip().upper(), time.time()),
         ).fetchone()
         return dict(row) if row else None
 
@@ -260,12 +276,12 @@ def acknowledge_events(device_id: int, event_ids: list[int], read: bool = False)
     return acked
 
 
-def claim_event(event_id: int, circle_id: int) -> dict[str, Any] | None:
+def claim_event(event_id: int, circle_id: int, device_id: int) -> dict[str, Any] | None:
     with db() as connection:
         cursor = connection.execute(
             "UPDATE events SET status = 'claimed', claimed_by = ?, claimed_at = ? "
-            "WHERE id = ? AND status = 'new'",
-            (circle_id, time.time(), event_id),
+            "WHERE id = ? AND device_id = ? AND kind IN ('help', 'alert') AND status = 'new'",
+            (circle_id, time.time(), event_id, device_id),
         )
         if cursor.rowcount == 0:
             # Someone else already claimed it, or it is not a help/alert. Returning None is what
@@ -275,14 +291,15 @@ def claim_event(event_id: int, circle_id: int) -> dict[str, Any] | None:
         return dict(row) if row else None
 
 
-def open_help_events(device_id: int) -> list[dict[str, Any]]:
+def latest_alert_at(device_id: int) -> float | None:
+    """Timestamp of the newest alert, claimed or not, for one silence episode."""
     with db() as connection:
-        rows = connection.execute(
-            "SELECT * FROM events WHERE device_id = ? AND kind IN ('help','alert') "
-            "AND status = 'new' ORDER BY id",
+        row = connection.execute(
+            "SELECT MAX(created_at) AS at FROM events WHERE device_id = ? AND kind = 'alert'",
             (device_id,),
-        ).fetchall()
-        return [dict(row) for row in rows]
+        ).fetchone()
+    value = row["at"] if row else None
+    return float(value) if value is not None else None
 
 
 def member_by_id(member_id: int) -> dict[str, Any] | None:

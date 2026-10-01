@@ -22,32 +22,44 @@ class SkillWriter(private val ask: suspend (instructions: String, prompt: String
     }
 
     private fun prompt(goal: String, appPackage: String?, transcript: List<AgentMessage>): String = buildString {
-        appendLine("目标：$goal")
+        appendLine("目标：${redact(goal)}")
         appendLine("当前 App：${appPackage.orEmpty().ifBlank { "未知" }}")
         appendLine()
         appendLine("操作记录：")
         transcript.forEach { message ->
             when (message.role) {
-                AgentMessage.Role.USER -> appendLine("用户：${message.content.take(400)}")
+                AgentMessage.Role.USER -> appendLine("用户：${redact(message.content).take(400)}")
                 AgentMessage.Role.ASSISTANT -> {
                     append("助手：")
-                    if (message.content.isNotBlank()) append(message.content.take(300))
+                    if (message.content.isNotBlank()) append(redact(message.content).take(300))
                     if (message.toolCalls.isNotEmpty()) {
                         append(" [调用] ")
                         append(
                             message.toolCalls.joinToString("；") { call ->
-                                val args = call.arguments.entries.joinToString(",") { "${it.key}=${it.value.take(60)}" }
+                                val args = call.arguments.entries.joinToString(",") {
+                                    "${it.key}=${redact(it.value).take(60)}"
+                                }
                                 "${call.tool}($args)"
                             },
                         )
                     }
                     appendLine()
                 }
-                AgentMessage.Role.TOOL -> appendLine("工具结果：${message.content.take(240)}")
+                AgentMessage.Role.TOOL -> appendLine("工具结果：${redact(message.content).take(240)}")
                 AgentMessage.Role.SYSTEM -> Unit
             }
         }
     }.take(MAX_PROMPT_CHARS)
+
+    /**
+     * The transcript may contain a phone number, ID or email seen on screen. The model is asked not
+     * to put them in the skill, but rule-based redaction keeps the most obvious identifiers out of
+     * the extra summarization request as well.
+     */
+    private fun redact(text: String): String = text
+        .replace(PHONE, "[手机号]")
+        .replace(ID_CARD, "[身份证]")
+        .replace(EMAIL, "[邮箱]")
 
     private fun parse(answer: String, goal: String, appPackage: String?): Skill {
         val text = answer
@@ -80,15 +92,15 @@ class SkillWriter(private val ask: suspend (instructions: String, prompt: String
             .take(48)
         return Skill(
             name = name,
-            description = (meta["description"] ?: meta["title"] ?: goal).take(80),
+            description = redact(meta["description"] ?: meta["title"] ?: goal).take(80),
             apps = meta["apps"].orEmpty()
                 .split(',')
                 .map { it.trim() }
                 .filter { it.isNotBlank() }
                 .toSet()
                 .ifEmpty { appPackage?.let { setOf(it) } ?: emptySet() },
-            hint = meta["hint"].orEmpty(),
-            body = body.take(MAX_BODY_CHARS),
+            hint = redact(meta["hint"].orEmpty()),
+            body = redact(body).take(MAX_BODY_CHARS),
             version = meta["version"]?.toIntOrNull() ?: 1,
             source = "learned",
         )
@@ -97,6 +109,9 @@ class SkillWriter(private val ask: suspend (instructions: String, prompt: String
     companion object {
         private const val MAX_PROMPT_CHARS = 12_000
         private const val MAX_BODY_CHARS = 6_000
+        private val PHONE = Regex("(?<!\\d)1[3-9]\\d{9}(?!\\d)")
+        private val ID_CARD = Regex("(?<!\\d)\\d{17}[0-9Xx](?!\\d)")
+        private val EMAIL = Regex("[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}")
 
         val INSTRUCTIONS = """
 你是银龄专线的技能提炼器。用户刚刚完成一次任务，系统将把这次记录交给家人查看。

@@ -5,6 +5,7 @@ import android.content.Intent
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
+import android.os.Build
 import android.os.IBinder
 import android.provider.Settings
 import android.animation.AnimatorListenerAdapter
@@ -13,6 +14,7 @@ import android.animation.ValueAnimator
 import android.view.View
 import android.view.ViewTreeObserver
 import android.view.Gravity
+import android.view.WindowInsets
 import android.view.WindowManager
 import kotlinx.coroutines.delay
 import android.view.animation.DecelerateInterpolator
@@ -29,10 +31,11 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import java.lang.ref.WeakReference
 
 class OverlayService : Service() {
     companion object {
-        private var active: OverlayService? = null
+        private var active: WeakReference<OverlayService>? = null
 
         /** Hidden for the duration of one action, so our own panel does not appear in screenshots. */
         private var hiddenForAction = false
@@ -42,12 +45,12 @@ class OverlayService : Service() {
 
         fun hideForAction(hide: Boolean) {
             hiddenForAction = hide
-            active?.updateVisibility()
+            active?.get()?.updateVisibility()
         }
 
         fun setHiddenInApp(hide: Boolean) {
             hiddenInApp = hide
-            active?.updateVisibility()
+            active?.get()?.updateVisibility()
         }
     }
 
@@ -63,6 +66,7 @@ class OverlayService : Service() {
     private lateinit var window: WindowManager
     private lateinit var root: LinearLayout
     private var collector: Job? = null
+    private var speakerCollector: Job? = null
     private var expanded = false
 
     /** Shape of the last render; rebuilding on every progress update would restart animations. */
@@ -117,7 +121,7 @@ class OverlayService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
-        active = this
+        active = WeakReference(this)
         if (!::root.isInitialized) {
             window = getSystemService(WINDOW_SERVICE) as WindowManager
             root = LinearLayout(this).apply {
@@ -145,6 +149,9 @@ class OverlayService : Service() {
             collector = scope.launch {
                 session.state.collect { state -> render(state) }
             }
+            speakerCollector = scope.launch {
+                session.speaking.collect { render(session.state.value) }
+            }
             // The panel has to redraw when the conversation state changes, not only when the task does.
             session.voice.onStateChanged = { render(session.state.value) }
             scope.launch { watchAccessibility() }
@@ -164,7 +171,7 @@ class OverlayService : Service() {
         val server = ServerClient(applicationContext as HotlineApp)
         // The daily peace message never actually ran before: nothing called PeaceCheck.tick(). It is
         // wired here because this loop is the only thing that is reliably alive while the app runs.
-        val peace = PeaceCheck(this)
+        val peace = (application as HotlineApp).peace
         while (true) {
             delay(ACCESSIBILITY_CHECK_MS)
             checkInWithTheCircle(server)
@@ -245,7 +252,7 @@ class OverlayService : Service() {
         // The conversation state belongs in here: without it the panel kept the old microphone label
         // and gave no sign that it had started listening, so the button looked dead.
         val shape = "${state.phase}|$expanded|${state.goal}|${state.message}|${state.options}|" +
-            "${circleMessage?.id}|${session.voice.state.value}"
+            "${circleMessage?.id}|${session.voice.state.value}|${session.speaking.value}"
         if (shape == lastShape) {
             // Same shape, but the run may have moved on a step: that is what the bubble shows.
             bubble?.text = pillLabel(state)
@@ -428,6 +435,7 @@ class OverlayService : Service() {
      */
     private fun pillLabel(state: SessionState): String = when {
         state.circleMessage != null -> "家人留言"
+        session.speaking.value -> "正在说…"
         session.voice.state.value == VoiceSession.State.RECORDING -> "正在听…"
         session.voice.state.value == VoiceSession.State.TRANSCRIBING -> "正在听懂…"
         state.needsPersonStep -> "等您操作"
@@ -764,14 +772,21 @@ class OverlayService : Service() {
 
     /** Height of the status bar, so the bubble sits just below the camera cut-out area. */
     private fun statusBarHeight(): Int {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val wm = getSystemService(WindowManager::class.java)
+            return wm?.currentWindowMetrics?.windowInsets
+                ?.getInsets(WindowInsets.Type.statusBars())
+                ?.top ?: dp(28)
+        }
         val id = resources.getIdentifier("status_bar_height", "dimen", "android")
         return if (id > 0) resources.getDimensionPixelSize(id) else dp(28)
     }
 
     override fun onDestroy() {
         pulse?.cancel()
-        if (active === this) active = null
+        if (active?.get() === this) active = null
         collector?.cancel()
+        speakerCollector?.cancel()
         scope.cancel()
         if (::root.isInitialized) window.removeView(root)
         super.onDestroy()

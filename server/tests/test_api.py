@@ -245,6 +245,20 @@ def test_silence_raises_one_alert_per_outage(client, device):
     assert watch.check_silence(silence_seconds=6 * 3600) == []
 
 
+def test_claimed_silence_alert_still_suppresses_repeats(client, device):
+    join(client, device, name="大女儿")
+    client.post("/api/device/heartbeat", json={}, headers=auth(device))
+    with db.db() as connection:
+        connection.execute("UPDATE devices SET last_seen_at = ?", (time.time() - 7 * 3600,))
+
+    raised = watch.check_silence(silence_seconds=6 * 3600)
+    assert len(raised) == 1
+    response = client.post(f"/family/claim/{raised[0]['id']}", follow_redirects=False)
+    assert response.status_code == 303
+    # Claiming the alert does not mean the silence is over; do not raise another one.
+    assert watch.check_silence(silence_seconds=6 * 3600) == []
+
+
 def test_a_device_that_never_checked_in_is_not_missing(client, device):
     # Pairing counts as contact; a device that has genuinely never checked in is still being set up.
     with db.db() as connection:
@@ -269,7 +283,54 @@ def test_summary_shape_is_stable(client, device):
     body = client.get(f"/api/devices/{device['device_id']}/summary").json()
     assert body["elder_name"] == "妈妈"
     assert [member["role"] for member in body["circle"]] == ["family"]
-    assert re.match(r"^\d", device["pair_code"]) is None  # codes are letters/digits, no surprises
+    assert re.fullmatch(r"[A-HJ-NP-Z2-9]{6}", device["pair_code"])  # no I/O/0/1 look-alikes
+
+
+
+def test_summary_requires_a_circle_session(client, device):
+    response = client.get(f"/api/devices/{device['device_id']}/summary")
+    assert response.status_code == 404
+
+
+def test_a_circle_cannot_claim_another_devices_help(client, device):
+    other = client.post("/api/device/pair", json={"elder_name": "爸爸"}).json()
+    join(client, other, name="别人家的家人", phone="13800000009", role="family")
+
+    created = client.post(
+        "/api/device/events",
+        json={"kind": "help", "title": "需要人帮忙", "body": "卡住了"},
+        headers=auth(device),
+    ).json()
+
+    response = client.post(f"/family/claim/{created['id']}", follow_redirects=False)
+    assert response.status_code == 303
+    with db.db() as connection:
+        row = connection.execute("SELECT status FROM events WHERE id = ?", (created["id"],)).fetchone()
+    assert row["status"] == "new"
+    acks = db.pending_for_device(device["device_id"])
+    assert all(item["kind"] != "ack" for item in acks)
+
+
+def test_expired_pair_code_is_refused(client, device):
+    with db.db() as connection:
+        connection.execute(
+            "UPDATE devices SET pair_code_expires_at = ? WHERE id = ?",
+            (time.time() - 1, device["device_id"]),
+        )
+    response = client.post(
+        "/join",
+        data={"pair_code": device["pair_code"], "name": "过期的人", "phone": "139", "role": "family"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 400
+
+
+def test_transcribe_rejects_oversized_audio(client, device):
+    from app import speech
+
+    too_big = b"\x00" * (speech.SAMPLE_RATE * 2 * speech.MAX_AUDIO_SECONDS + 1)
+    response = client.post("/api/device/transcribe", content=too_big, headers=auth(device))
+    assert response.status_code == 413
 
 
 # --------------------------------------------------------------------------- 语音识别（讯飞）

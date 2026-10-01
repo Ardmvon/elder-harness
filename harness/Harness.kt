@@ -361,7 +361,14 @@ fun main() = runBlocking {
         val planner = object : AgentPlanner {
             override suspend fun decide(
                 instructions: String, tools: List<AgentToolSpec>, transcript: List<AgentMessage>,
-            ) = AgentStep.Calls(listOf(ToolInvocation("c1", "tap_text", mapOf("argument" to "进去"))))
+            ): AgentStep {
+                val step = transcript.count { it.role == AgentMessage.Role.TOOL }
+                return if (step % 2 == 0) {
+                    AgentStep.Calls(listOf(ToolInvocation("enter$step", "tap_text", mapOf("argument" to "进去"))))
+                } else {
+                    AgentStep.Calls(listOf(ToolInvocation("back$step", "back", emptyMap())))
+                }
+            }
         }
         val loop = AgentLoop(planner, phone, object : ActionApproval {
             override suspend fun confirm(invocation: ToolInvocation) = true

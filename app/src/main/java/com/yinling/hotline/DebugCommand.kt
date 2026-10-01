@@ -97,6 +97,8 @@ object DebugCommand {
         // silently reset the person's own settings.
         if (extras.has(EXTRA_VISION)) edit.putBoolean("vision", extras.value(EXTRA_VISION) == true)
         if (extras.has(EXTRA_AUTO_CONFIRM)) edit.putBoolean("auto_confirm", extras.value(EXTRA_AUTO_CONFIRM) == true)
+        // The extra is also the developer switch; persist it so the full trace really is written.
+        edit.putBoolean("developer_mode", true)
 
         // The key stays in memory by design, so it is never written to preferences.
         (extras.value(EXTRA_API_KEY) as? String)?.takeIf { it.isNotBlank() }?.let { session.apiKey = it.trim() }

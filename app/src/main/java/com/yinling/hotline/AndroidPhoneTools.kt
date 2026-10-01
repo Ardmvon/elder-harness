@@ -96,7 +96,17 @@ class AndroidPhoneTools(private val app: HotlineApp) : AgentTools {
                 as android.content.ClipboardManager
             clipboard.setPrimaryClip(android.content.ClipData.newPlainText("银龄专线", call.text))
             delay(120)
-            return@withContext service.pasteIntoFocusedField()
+            try {
+                service.pasteIntoFocusedField()
+            } finally {
+                // The clipboard is process-wide, and the pasted text may be private. Do not leave
+                // it behind for the next app that reads the clipboard.
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+                    clipboard.clearPrimaryClip()
+                } else {
+                    clipboard.setPrimaryClip(android.content.ClipData.newPlainText("", ""))
+                }
+            }
         }
 
         // WeChat and similar apps expose no accessibility tree. Tools that look a control up by id
@@ -130,7 +140,15 @@ class AndroidPhoneTools(private val app: HotlineApp) : AgentTools {
             result.copy(
                 screenChanged = changed,
                 detail = result.detail + if (changed) " 页面有变化，需核对目标结果。" else " 页面暂无变化，可等待或调整操作。",
-                image = result.image?.takeIf { it.revision == after.revision },
+                // A screenshot was valid at capture time. Meituan-style pages animate while the
+                // post-action revision is being sampled, and dropping the image made AgentLoop see
+                // "screenshot failed (ok)" until it gave up. Only bind non-screenshot images to the
+                // revision they were captured for.
+                image = if (call.name == "screenshot") {
+                    result.image
+                } else {
+                    result.image?.takeIf { it.revision == after.revision }
+                },
             )
         } catch (cancelled: CancellationException) {
             throw cancelled

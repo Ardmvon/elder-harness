@@ -17,6 +17,9 @@ class HotlineApp : Application() {
     /** Reads/writes generated skills under files/skills/. */
     val skills: SkillStore by lazy { SkillStore(this) }
 
+    /** One shared judge for the daily peace check, used by the service and settings. */
+    val peace: PeaceCheck by lazy { PeaceCheck(this) }
+
     override fun onCreate() {
         super.onCreate()
         LoopLog.attach(this)

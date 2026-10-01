@@ -50,6 +50,8 @@ data class ToolCall(
     val endY: Int = -1,
     // Bound by the loop from the observation that justified the call, never trusted from model output.
     val revision: String = "",
+    /** Identity captured from the observation; used to reject stale ids after a page change. */
+    val expected: String = "",
 )
 
 data class ScreenImage(val base64: String, val revision: String, val mimeType: String = "image/png")
