@@ -22,6 +22,8 @@ data class ScreenElement(
     val rangeCurrent: Int? = null,
     val rangeMin: Int? = null,
     val rangeMax: Int? = null,
+    /** Platform resource id when the app exposes one; a stable identity for unlabeled controls. */
+    val viewId: String = "",
 ) {
     val isSlider: Boolean
         get() = role == "SeekBar" || (rangeMax != null && rangeMin != null && rangeMax != rangeMin)

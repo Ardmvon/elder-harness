@@ -853,7 +853,9 @@ class AgentLoop(
         val target = invocation.arguments["target"].orEmpty()
         val element = screen.elements.find { it.id == target }
         val expected = element?.let {
-            it.text.ifBlank { it.description }.ifBlank { "bounds:${it.bounds}" }
+            it.text.ifBlank { it.description }
+                .ifBlank { it.viewId.takeIf(String::isNotBlank)?.let { id -> "viewId:$id" }.orEmpty() }
+                .ifBlank { if (it.isSlider) "slider" else "bounds:${it.bounds}" }
         }.orEmpty()
         return if (expected.isBlank()) call else call.copy(expected = expected)
     }

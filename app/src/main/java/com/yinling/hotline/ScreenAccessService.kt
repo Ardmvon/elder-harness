@@ -283,7 +283,8 @@ class ScreenAccessService : AccessibilityService() {
                         listOf(bounds.left, bounds.top, bounds.right, bounds.bottom), node.isClickable,
                         node.isLongClickable, node.isEditable && !node.isPassword, node.isScrollable,
                         node.isEnabled && !node.isPassword, parent,
-                        range?.current?.toInt(), range?.min?.toInt(), range?.max?.toInt())
+                        range?.current?.toInt(), range?.min?.toInt(), range?.max?.toInt(),
+                        viewId = node.viewIdResourceName.orEmpty())
                 }
             } else {
                 invisible++
@@ -397,9 +398,13 @@ class ScreenAccessService : AccessibilityService() {
         if (call.name == "screenshot") return screenshot(screen)
         fun stillTheSame(id: String, wanted: String): Boolean {
             val element = screen.elements.find { it.id == id } ?: return false
-            if (wanted.startsWith("bounds:")) return "bounds:${element.bounds}" == wanted
-            if (wanted.isBlank()) return true
-            return element.text == wanted || element.description == wanted
+            return when {
+                wanted.startsWith("viewId:") -> element.viewId == wanted.removePrefix("viewId:")
+                wanted == "slider" -> element.isSlider
+                wanted.startsWith("bounds:") -> "bounds:${element.bounds}" == wanted
+                wanted.isBlank() -> true
+                else -> element.text == wanted || element.description == wanted
+            }
         }
 
         val target = if (call.name == "tap_text") {

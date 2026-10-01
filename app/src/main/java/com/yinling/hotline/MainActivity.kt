@@ -476,7 +476,7 @@ private fun HomePage(
                     state.phase == TaskPhase.CANNOT -> ElderCard {
                     Text(state.message, fontSize = Elder.body)
                     ElderPrimaryButton("我做好了，继续", onResumeTask)
-                    ElderSecondaryButton("停下来", onStop)
+                    ElderSecondaryButton("结束这件事", onFinish)
                 }
 
                 state.phase == TaskPhase.COMPLETED -> ElderCard {

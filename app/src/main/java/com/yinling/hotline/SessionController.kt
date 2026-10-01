@@ -81,6 +81,7 @@ class SessionController(private val app: HotlineApp) : FamilyGateway {
             app.speaker.enabled = value
         }
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private val sessions = SessionStore(app)
     private val mutableState = MutableStateFlow(initialState())
     val state = mutableState.asStateFlow()
 
@@ -133,7 +134,6 @@ class SessionController(private val app: HotlineApp) : FamilyGateway {
         }
 
     private val phoneTools = AndroidPhoneTools(app)
-    private val sessions = SessionStore(app)
 
     /**
      * Downlink news from the trusted circle. These are not part of the task transcript: they are
@@ -168,10 +168,21 @@ class SessionController(private val app: HotlineApp) : FamilyGateway {
 
     private fun initialState(): SessionState {
         val goal = prefs.getString("goal", "").orEmpty()
+        val currentId = prefs.getString(KEY_CURRENT_SESSION, "").orEmpty()
+        val current = currentId.takeIf { it.isNotBlank() }?.let { sessions.load(it) }
+        val saved = current?.takeIf { it.unfinished }
+            // Legacy saves had no current_session_id; recover the newest matching unfinished task.
+            ?: if (current == null) {
+                sessions.list().firstOrNull { it.unfinished && it.goal == goal }
+            } else {
+                null
+            }
+        val resumable = goal.isNotBlank() && saved != null
+        if (!resumable && currentId.isNotBlank()) prefs.edit().remove("goal").apply()
         return SessionState(
-            goal = goal,
-            message = if (goal.isBlank()) "说出要办的事，我来帮您看下一步。" else "上次的事还可以接着办。",
-            phase = if (goal.isBlank()) TaskPhase.IDLE else TaskPhase.PAUSED,
+            goal = if (resumable) goal else "",
+            message = if (resumable) "上次的事还可以接着办。" else "说出要办的事，我来帮您看下一步。",
+            phase = if (resumable) TaskPhase.PAUSED else TaskPhase.IDLE,
         )
     }
 
@@ -342,20 +353,25 @@ class SessionController(private val app: HotlineApp) : FamilyGateway {
                 delay(650)
                 LoopLog.event("[session] launching loop resume=$resume access=${ScreenAccessService.active != null}")
                 val running = loop ?: buildLoop().also { loop = it }
-            if (resume && loop === running && running.conversation.isEmpty()) {
-                // Coming back after a restart: reload the saved conversation before planning, so the
-                // request prefix (and therefore the provider cache) is the same as last time.
-                // The fallback covers upgrades from builds that did not persist the session id yet.
-                val saved = sessions.load(sessionId)
-                    ?: sessions.list().firstOrNull { it.unfinished && it.goal == state.value.goal }
-                if (saved != null) {
+                if (resume && loop === running && running.conversation.isEmpty()) {
+                    // Coming back after a restart: reload the saved conversation before planning, so the
+                    // request prefix (and therefore the provider cache) is the same as last time.
+                    // The fallback covers upgrades from builds that did not persist the session id yet.
+                    val saved = sessions.load(sessionId)?.takeIf { it.unfinished }
+                        ?: sessions.list().firstOrNull { it.unfinished && it.goal == state.value.goal }
+                    if (saved == null) {
+                        // The persisted goal points at a finished/deleted session. Do not resurrect it.
+                        loop = null
+                        prefs.edit().remove("goal").apply()
+                        mutableState.value = SessionState()
+                        return@launch
+                    }
                     sessionId = saved.id
                     prefs.edit().putString(KEY_CURRENT_SESSION, sessionId).apply()
                     if (running.restore(saved.messages, saved.steps)) {
                         LoopLog.event("[session] restored from disk id=$sessionId messages=${saved.messages.size}")
                     }
                 }
-            }
                 val outcome = if (resume) running.resume() else running.start(state.value.goal)
                 settle(outcome)
             } catch (cancelled: kotlinx.coroutines.CancellationException) {

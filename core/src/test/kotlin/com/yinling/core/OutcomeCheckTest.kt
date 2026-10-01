@@ -22,6 +22,22 @@ class OutcomeCheckTest {
     }
 
     @Test
+    fun `a short message before the recipient is accepted`() {
+        val now = System.currentTimeMillis()
+        val calls = listOf(ExecutedCall(tool = "paste_text", argument = "e1 好", success = true, atMillis = now))
+        val verdict = OutcomeCheck.check("已发送「好」给「女儿」", calls, now)
+        assertTrue(verdict is OutcomeVerdict.Supported)
+    }
+
+    @Test
+    fun `the recipient does not substitute for the message text`() {
+        val now = System.currentTimeMillis()
+        val calls = listOf(ExecutedCall(tool = "input_text", argument = "e1 女儿", success = true, atMillis = now))
+        val verdict = OutcomeCheck.check("已发送「我到家了」给「女儿」", calls, now)
+        assertTrue(verdict is OutcomeVerdict.Unsupported)
+    }
+
+    @Test
     fun `a quoted fragment nobody typed is rejected`() {
         val now = System.currentTimeMillis()
         val calls = listOf(ExecutedCall(tool = "click", argument = "e1", success = true, atMillis = now))
