@@ -123,10 +123,10 @@ object PhoneToolCatalog {
             needsApproval = true,
         ),
         AgentToolSpec(
-            "tap_xy", "按屏幕比例点按，图标或无控件编号时用",
+            "tap_xy", "按屏幕比例点按，图标或无控件编号时用；截图带 5% 网格，尽量给 0.01 精度",
             listOf(
-                param("x", "number", "0..1，左上为0"),
-                param("y", "number", "0..1，左上为0"),
+                param("x", "number", "0..1，左上为0，尽量两位小数"),
+                param("y", "number", "0..1，左上为0，尽量两位小数"),
             ),
             needsApproval = true,
         ),

@@ -662,16 +662,20 @@ class ScreenAccessService : AccessibilityService() {
     } ?: failure("gesture_timeout", "滑动结果等待超时，请重新观察，勿盲目重复。")
 
     /**
-     * Draws a 10% coordinate grid on the screenshot.
+     * Draws a 10% labelled grid plus 5% auxiliary lines on the screenshot.
      *
      * On pages with no accessibility tree the model can only point by estimating a ratio from the
      * picture, and that estimate carries tens of pixels of error — enough to miss a chat row or the
-     * input strip at the bottom of WeChat. A labelled grid gives it a ruler instead of a guess.
-     * Drawn before encoding, so it costs nothing per step.
+     * input strip at the bottom of WeChat. The 10% labels are the ruler; the finer 5% lines give
+     * the model a visual mid-step without turning the screenshot into graph paper.
      */
     private fun drawGrid(target: Bitmap) {
         val canvas = android.graphics.Canvas(target)
-        val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+        val minor = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+            color = android.graphics.Color.argb(35, 200, 0, 0)
+            strokeWidth = 1f
+        }
+        val major = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
             color = android.graphics.Color.argb(70, 255, 60, 60)
             strokeWidth = 2f
         }
@@ -679,12 +683,20 @@ class ScreenAccessService : AccessibilityService() {
             color = android.graphics.Color.argb(150, 200, 0, 0)
             textSize = target.height / 90f
         }
+        // 5% auxiliary lines (odd twentieths); 10% lines are drawn as the labelled ruler below.
+        for (step in 1..19 step 2) {
+            val ratio = step / 20f
+            val x = target.width * ratio
+            val y = target.height * ratio
+            canvas.drawLine(x, 0f, x, target.height.toFloat(), minor)
+            canvas.drawLine(0f, y, target.width.toFloat(), y, minor)
+        }
         for (step in 1..9) {
             val ratio = step / 10f
             val x = target.width * ratio
             val y = target.height * ratio
-            canvas.drawLine(x, 0f, x, target.height.toFloat(), paint)
-            canvas.drawLine(0f, y, target.width.toFloat(), y, paint)
+            canvas.drawLine(x, 0f, x, target.height.toFloat(), major)
+            canvas.drawLine(0f, y, target.width.toFloat(), y, major)
             canvas.drawText("%.1f".format(ratio), x + 4f, label.textSize, label)
             canvas.drawText("%.1f".format(ratio), 4f, y - 4f, label)
         }
@@ -762,7 +774,7 @@ class ScreenAccessService : AccessibilityService() {
             lastScreenshotSize = target.width to target.height
             return ToolResult(
                 true,
-                "已读取屏幕图像（${target.width}x${target.height}，图上有 10% 刻度网格，坐标按屏幕比例给出）。",
+                "已读取屏幕图像（${target.width}x${target.height}，图上有 10% 主刻度 + 5% 辅助网格，坐标按屏幕比例给出）。",
                 image = ScreenImage(Base64.encodeToString(bytes, Base64.NO_WRAP), screen.revision, mime),
             )
         } finally {
