@@ -26,7 +26,9 @@ data class ScreenElement(
     val viewId: String = "",
 ) {
     val isSlider: Boolean
-        get() = role == "SeekBar" || (rangeMax != null && rangeMin != null && rangeMax != rangeMin)
+        get() = role == "SeekBar" ||
+            role.endsWith("SeekBar") ||
+            (rangeMax != null && rangeMin != null && rangeMax != rangeMin)
 }
 
 data class ScreenSnapshot(
@@ -227,7 +229,9 @@ object PhoneToolCatalog {
 
         if (screen.elements.none { it.role != KEYBOARD_ROLE }) {
             append("没有读到任何控件。可以下滑看看，或返回桌面重新打开应用。\n")
-        } else if (unnamedLeaves(screen) >= GRAPHICAL_LEAF_THRESHOLD) {
+        } else if (unnamedLeaves(screen) >= GRAPHICAL_LEAF_THRESHOLD &&
+            screen.elements.none { it.isSlider || it.editable }
+        ) {
             append("这一页有 ").append(unnamedLeaves(screen))
             append(" 个没有文字的控件，内容多半在图像里（表格、图表、图片文字）。")
             append("请直接用 screenshot 读图，不要逐个点进去探索：点进去会离开这一页，回来时常常已经不是同一页。\n")
