@@ -23,7 +23,6 @@ class HotlineApp : Application() {
     override fun onCreate() {
         super.onCreate()
         LoopLog.attach(this)
-        skills.seedDemoCandidateIfNeeded()
         refreshSkills()
         session = SessionController(this)
         LoopLog.enabled = session.developerMode

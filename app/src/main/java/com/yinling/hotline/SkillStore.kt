@@ -12,8 +12,6 @@ import java.io.File
  */
 class SkillStore(private val context: Context) {
 
-    private val prefs = context.getSharedPreferences("hotline", 0)
-
     private val root: File get() = File(context.filesDir, "skills").apply { mkdirs() }
     private val candidateDir: File get() = File(root, "candidate").apply { mkdirs() }
     private val activeDir: File get() = File(root, "active").apply { mkdirs() }
@@ -45,20 +43,6 @@ class SkillStore(private val context: Context) {
             file.writeText(renderMarkdown(stored))
             true
         }.getOrDefault(false)
-    }
-
-    /**
-     * One demo candidate so the settings screen is not empty before the writer exists. The flag keeps
-     * it from reappearing after the family adopts or deletes it.
-     */
-    fun seedDemoCandidateIfNeeded() {
-        if (prefs.getBoolean("skills_seeded", false)) return
-        val file = candidateFile("meituan_waimai_order")
-        if (!file.exists()) {
-            runCatching { file.writeText(DEMO_CANDIDATE) }
-                .onFailure { LoopLog.event("[skill] 演示候选写入失败：${it.message}") }
-        }
-        prefs.edit().putBoolean("skills_seeded", true).apply()
     }
 
     private fun read(dir: File, status: String): List<Skill> =
@@ -154,49 +138,4 @@ class SkillStore(private val context: Context) {
     private fun safeName(name: String): String =
         name.filter { it.isLetterOrDigit() || it == '_' || it == '-' }.ifBlank { "skill" }
 
-    private companion object {
-        val DEMO_CANDIDATE = """
-            ---
-            name: meituan_waimai_order
-            description: 美团点外卖流程（演示候选）
-            version: 1
-            apps: com.sankuai.meituan
-            source: learned
-            ---
-
-            ## 适用条件
-
-            - 当前 App：美团
-            - 目标里包含“外卖 / 点餐 / 买饭”
-
-            ## 流程
-
-            1. 主页进入“外卖”频道
-               - 动作意图：找到外卖入口并进入
-               - 成功后页面：出现搜索框、定位和外卖商家列表
-
-            2. 搜索目标商家或菜品
-               - 动作意图：点搜索框，输入目标
-               - 成功后页面：搜索结果列表
-
-            3. 选择目标商家
-               - 动作意图：点唯一匹配的商家
-               - 成功后页面：商家详情和菜单
-
-            4. 选择菜品与规格
-               - 动作意图：按老人确认的规格选菜，加入购物车
-               - 成功后页面：出现购物车或结算入口
-
-            5. 到结算页停下
-               - 必须用 ask_person
-               - 只说明金额、地址、要点哪里
-               - 不允许自动支付或提交订单
-
-            ## 失败恢复
-
-            - 找不到搜索框：先回主页，再找外卖频道入口
-            - 商家页打不开：返回搜索结果重新选
-            - 遇到推广弹窗：先关闭，再继续原流程
-        """.trimIndent()
-    }
 }
