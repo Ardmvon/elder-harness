@@ -134,6 +134,9 @@ class ScreenAccessService : AccessibilityService() {
             "确认下单", "提交订单", "确认付款", "付款码", "免密", "先用后付", "充值", "提现",
             "还款", "打赏", "订阅", "续费", "确认收货", "立即预订", "确认预订",
         )
+
+        /** Result of checking text against manual-action words. */
+        data class TextSafetyCheck(val safe: Boolean, val hitWord: String? = null)
     }
 
     override fun onServiceConnected() {
@@ -349,6 +352,19 @@ class ScreenAccessService : AccessibilityService() {
     }
 
     fun snapshot(): ScreenSnapshot = readPage().use { it.screen }
+
+    /**
+     * Checks text content (to be typed or pasted) against manual-action words.
+     * Returns safe=false when the text contains a word that requires the person to input it themselves.
+     */
+    fun checkTextForManualActions(text: String): Companion.TextSafetyCheck {
+        val hit = manualActions.firstOrNull { text.contains(it) }
+        return if (hit != null) {
+            Companion.TextSafetyCheck(safe = false, hitWord = hit)
+        } else {
+            Companion.TextSafetyCheck(safe = true)
+        }
+    }
 
     private fun failure(code: String, message: String) = ToolResult(false, message, code)
 
