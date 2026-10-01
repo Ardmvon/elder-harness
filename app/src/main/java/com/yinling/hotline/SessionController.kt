@@ -8,6 +8,7 @@ import com.yinling.core.AgentLoop
 import com.yinling.core.AgentMessage
 import com.yinling.core.AgentOutcome
 import com.yinling.core.AgentStep
+import com.yinling.core.ScreenElement
 import com.yinling.core.ScreenSnapshot
 import com.yinling.core.ToolCall
 import com.yinling.core.ToolInvocation
@@ -303,7 +304,7 @@ class SessionController(private val app: HotlineApp) : FamilyGateway {
      * centre of controls whose accessibility bounds are known, then compares the answer with those
      * bounds. This separates model estimation error from gesture dispatch error.
      */
-    fun calibrateTap(maxTargets: Int = 8) {
+    fun calibrateTap(maxTargets: Int = 20) {
         scope.launch {
             try {
                 delay(700) // let the debug Activity move behind the page being measured
@@ -314,16 +315,31 @@ class SessionController(private val app: HotlineApp) : FamilyGateway {
                     LoopLog.event("[calib] 当前页面没有可用尺寸")
                     return@launch
                 }
+                val byId = screen.elements.associateBy { it.id }
                 val targets = screen.elements
+                    .asSequence()
                     .filter {
                         it.bounds.size == 4 &&
-                            (it.bounds[2] - it.bounds[0]) > 8 &&
-                            (it.bounds[3] - it.bounds[1]) > 8 &&
                             (it.text.isNotBlank() || it.description.isNotBlank())
                     }
-                    .distinctBy { it.text.ifBlank { it.description } }
-                    .sortedByDescending { it.clickable }
+                    .mapNotNull { element ->
+                        // The visible label may be a child; the actual tap target is the nearest
+                        // clickable ancestor. Measure against that ancestor, not the text bounds.
+                        val bounds = clickableBounds(element, byId) ?: return@mapNotNull null
+                        val w = bounds[2] - bounds[0]
+                        val h = bounds[3] - bounds[1]
+                        val tooWide = w > width * 0.98
+                        val tooTall = h > height * 0.42
+                        if (w < 24 || h < 20 || (tooWide && tooTall)) return@mapNotNull null
+                        TapCalibrationTarget(
+                            label = element.text.ifBlank { element.description }.take(40),
+                            bounds = bounds,
+                        )
+                    }
+                    .distinctBy { it.label }
+                    .sortedBy { it.bounds[1] }
                     .take(maxTargets)
+                    .toList()
                 if (targets.isEmpty()) {
                     LoopLog.event("[calib] 当前页面没有带文字的可点按控件")
                     return@launch
@@ -348,7 +364,7 @@ class SessionController(private val app: HotlineApp) : FamilyGateway {
                     var dxSum = 0.0
                     var dySum = 0.0
                     targets.forEach { target ->
-                        val label = target.text.ifBlank { target.description }.take(30)
+                        val label = target.label
                         val prompt = "当前页面截图如下。请只根据截图判断控件「$label」的中心点，\n" +
                             "输出严格的归一化坐标，格式：x=0.123,y=0.456。\n" +
                             "不要解释，不要输出其他文字。"
@@ -412,6 +428,21 @@ class SessionController(private val app: HotlineApp) : FamilyGateway {
                 LoopLog.event("[calib] 失败：${error.javaClass.simpleName} ${error.message}")
             }
         }
+    }
+
+    /** Nearest enabled, clickable ancestor with valid bounds; null means this label is not tappable. */
+    private fun clickableBounds(
+        element: ScreenElement,
+        byId: Map<String, ScreenElement>,
+    ): List<Int>? {
+        var current: ScreenElement? = element
+        while (current != null) {
+            if (current.enabled && current.clickable && current.bounds.size == 4) {
+                return current.bounds
+            }
+            current = current.parentId?.let(byId::get)
+        }
+        return null
     }
 
     /** Parses the strict x=...,y=... calibration answer, with a comma-only fallback. */
@@ -961,6 +992,11 @@ class SessionController(private val app: HotlineApp) : FamilyGateway {
 
 
 private const val KEY_CURRENT_SESSION = "current_session_id"
+
+private data class TapCalibrationTarget(
+    val label: String,
+    val bounds: List<Int>,
+)
 
 private val CALIBRATION_INSTRUCTIONS = """
 你正在做坐标校准。只根据用户提供的截图判断目标控件的位置。
