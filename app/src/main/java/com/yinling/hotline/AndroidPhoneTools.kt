@@ -51,6 +51,26 @@ class AndroidPhoneTools(private val app: HotlineApp) : AgentTools {
         }
         // Skill lookup is pure data, available everywhere and never touches the screen.
         if (call.name == "load_skill") return@withContext SkillCatalog.load(call)
+
+        // Block text input containing manual-action words across all three input paths.
+        if (call.name in setOf("type_text", "paste_text", "input_text")) {
+            val service = ScreenAccessService.active
+            if (service != null) {
+                val textToCheck = when (call.name) {
+                    "type_text", "paste_text" -> call.text
+                    "input_text" -> call.argument
+                    else -> ""
+                }
+                val check = service.checkTextForManualActions(textToCheck)
+                if (!check.safe) {
+                    return@withContext ToolResult(
+                        false,
+                        "文字中包含「${check.hitWord}」，这类内容需要本人亲自确认并输入，AI 代理不能代劳。请向本人说明情况。",
+                        "manual_action_required"
+                    )
+                }
+            }
+        }
         if (call.name == "current_time") {
             // The person speaks in relative time and nothing else in the request says what today is.
             val now = java.text.SimpleDateFormat("yyyy年M月d日 EEEE HH:mm", java.util.Locale.CHINA)
