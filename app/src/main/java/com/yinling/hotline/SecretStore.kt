@@ -9,6 +9,7 @@ import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * The API key, encrypted at rest with a key that lives in the Android Keystore.
@@ -34,12 +35,17 @@ object SecretStore {
     private const val TRANSFORM = "AES/GCM/NoPadding"
     private const val TAG_BITS = 128
 
+    /** Bumped whenever the on-disk secret changes, so per-process caches can invalidate. */
+    private val revisionCounter = AtomicLong(0)
+    val revision: Long get() = revisionCounter.get()
+
     fun save(context: Context, plain: String, name: String = API_KEY) {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val ciphertextKey = "${name}_enc"
         val ivKey = "${name}_iv"
         if (plain.isBlank()) {
             prefs.edit().remove(ciphertextKey).remove(ivKey).apply()
+            revisionCounter.incrementAndGet()
             return
         }
         runCatching {
@@ -50,9 +56,11 @@ object SecretStore {
                 .putString(ciphertextKey, Base64.encodeToString(bytes, Base64.NO_WRAP))
                 .putString(ivKey, Base64.encodeToString(cipher.iv, Base64.NO_WRAP))
                 .apply()
+            revisionCounter.incrementAndGet()
         }.onFailure {
             // Never leave an older secret on disk while the caller believes the new one is saved.
             prefs.edit().remove(ciphertextKey).remove(ivKey).apply()
+            revisionCounter.incrementAndGet()
             LoopLog.event("[key] 保存失败，旧值已清除：${it.message}")
         }
     }
@@ -63,6 +71,7 @@ object SecretStore {
         val iv = prefs.getString("${name}_iv", null)
         if (iv == null) {
             prefs.edit().remove("${name}_enc").apply()
+            revisionCounter.incrementAndGet()
             return ""
         }
         return runCatching {
@@ -75,6 +84,7 @@ object SecretStore {
             String(cipher.doFinal(Base64.decode(data, Base64.NO_WRAP)))
         }.getOrElse {
             prefs.edit().remove("${name}_enc").remove("${name}_iv").apply()
+            revisionCounter.incrementAndGet()
             LoopLog.event("[key] 解密失败，已清除（需要重新填写）：${it.message}")
             ""
         }

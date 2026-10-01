@@ -42,13 +42,21 @@ class ServerClient(private val app: HotlineApp) {
 
     /** Kept encrypted: it is the credential that lets this phone post events. */
     private var cachedToken: String? = null
+    private var cachedRevision: Long = -1
     var token: String
-        get() = cachedToken ?: SecretStore.load(app, SecretStore.DEVICE_TOKEN)
-            .also { cachedToken = it }
+        get() {
+            val revision = SecretStore.revision
+            if (cachedRevision == revision) return cachedToken.orEmpty()
+            return SecretStore.load(app, SecretStore.DEVICE_TOKEN).also {
+                cachedToken = it
+                cachedRevision = revision
+            }
+        }
         set(value) {
             val trimmed = value.trim()
-            cachedToken = trimmed
             SecretStore.save(app, trimmed, SecretStore.DEVICE_TOKEN)
+            cachedToken = trimmed
+            cachedRevision = SecretStore.revision
         }
 
     var pairCode: String
