@@ -7,10 +7,14 @@ import kotlinx.coroutines.launch
  * Debug-only entry point, so a task can be driven from a computer without typing the key on the
  * phone. Only active in debuggable builds and only when the intent asks for it explicitly.
  *
+ * Security: endpoint and auto_confirm are NOT settable via intent. They control API routing and
+ * confirmation prompts, so letting any app change them would allow key exfiltration and silent
+ * operation. Set these in the settings UI instead.
+ *
  * ```
  * adb shell am start -n com.yinling.hotline/.MainActivity --ez developer_mode true \
- *   --es apikey sk-xxx --es endpoint https://api.deepseek.com --es model deepseek-chat \
- *   --ez dev_mode true --ez start true --es goal "打开美团点一份外卖"
+ *   --es apikey sk-xxx --es model deepseek-chat \
+ *   --ez start true --es goal "打开美团点一份外卖"
  * ```
  */
 object DebugCommand {
@@ -92,14 +96,16 @@ object DebugCommand {
         val prefs = context.getSharedPreferences("hotline", 0)
         val edit = prefs.edit()
 
-        (extras.value(EXTRA_ENDPOINT) as? String)?.takeIf { it.isNotBlank() }?.let { edit.putString("endpoint", it.trim()) }
+        // Security: endpoint and auto_confirm are not settable via intent. They control where API
+        // calls go and whether the person sees confirmation prompts. An attacker who can send intents
+        // (zero permission on Android) must not be able to redirect API keys to their own server or
+        // silence the person's awareness of what the agent is doing. Set these in the settings UI.
         (extras.value(EXTRA_SERVER) as? String)?.takeIf { it.isNotBlank() }?.let { edit.putString("server_url", it.trim().trimEnd('/')) }
         (extras.value(EXTRA_ELDER) as? String)?.takeIf { it.isNotBlank() }?.let { edit.putString("elder_name", it.trim()) }
         (extras.value(EXTRA_MODEL) as? String)?.takeIf { it.isNotBlank() }?.let { edit.putString("model", it.trim()) }
         // Only touch a switch when the caller actually passed it, otherwise a debug launch would
         // silently reset the person's own settings.
         if (extras.has(EXTRA_VISION)) edit.putBoolean("vision", extras.value(EXTRA_VISION) == true)
-        if (extras.has(EXTRA_AUTO_CONFIRM)) edit.putBoolean("auto_confirm", extras.value(EXTRA_AUTO_CONFIRM) == true)
         // The key stays in memory by design, so it is never written to preferences.
         (extras.value(EXTRA_API_KEY) as? String)?.takeIf { it.isNotBlank() }?.let { session.apiKey = it.trim() }
         edit.apply()
