@@ -94,7 +94,14 @@ object OutcomeCheck {
         if (quoted.isNotEmpty()) {
             val typed = successful
                 .filter { it.tool in TEXT_ENTRY }
-                .joinToString(" ") { it.argument }
+                .joinToString(" ") { call ->
+                    // For input_text, argument is "target text"; extract only the text part
+                    if (call.tool == "input_text") {
+                        call.argument.substringAfter(' ', "")
+                    } else {
+                        call.argument
+                    }
+                }
             val traceable = quoted.firstOrNull { typed.contains(it) }
             if (traceable == null) {
                 val evidence = quoted.maxByOrNull { it.length } ?: quoted.first()

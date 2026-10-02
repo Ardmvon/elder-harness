@@ -53,22 +53,21 @@ class AndroidPhoneTools(private val app: HotlineApp) : AgentTools {
         if (call.name == "load_skill") return@withContext SkillCatalog.load(call)
 
         // Block text input containing manual-action words across all three input paths.
+        // This check must run regardless of service availability, because type_text can execute
+        // via injectText() without the accessibility service.
         if (call.name in setOf("type_text", "paste_text", "input_text")) {
-            val service = ScreenAccessService.active
-            if (service != null) {
-                val textToCheck = when (call.name) {
-                    "type_text", "paste_text" -> call.text
-                    "input_text" -> call.argument
-                    else -> ""
-                }
-                val check = service.checkTextForManualActions(textToCheck)
-                if (!check.safe) {
-                    return@withContext ToolResult(
-                        false,
-                        "文字中包含「${check.hitWord}」，这类内容需要本人亲自确认并输入，AI 代理不能代劳。请向本人说明情况。",
-                        "manual_action_required"
-                    )
-                }
+            val textToCheck = when (call.name) {
+                "type_text", "paste_text" -> call.text
+                "input_text" -> call.text  // Fixed: was call.argument, which is used by open_app
+                else -> ""
+            }
+            val check = ScreenAccessService.checkTextForManualActions(textToCheck)
+            if (!check.safe) {
+                return@withContext ToolResult(
+                    false,
+                    "文字中包含「${check.hitWord}」，这类内容需要本人亲自确认并输入，AI 代理不能代劳。请向本人说明情况。",
+                    "manual_action_required"
+                )
             }
         }
         if (call.name == "current_time") {
