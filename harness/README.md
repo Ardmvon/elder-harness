@@ -7,7 +7,7 @@
 harness/run.sh          # 全通过时退出码 0
 ```
 
-前置：JDK 17、`python3`、以及一次 `./gradlew :app:assembleDebug`（依赖都在 Gradle 缓存里，脚本自己拼 classpath）。
+前置：JDK 17、`python3`，以及 Gradle 能解析项目依赖。脚本通过 `:harness:run` 编译，使用临时端口启动 mock 服务，不再手工拼接本机缓存 jar。
 
 ## 为什么要有它
 
@@ -37,6 +37,10 @@ transcript 的结构合法性是硬约束：每个 `tool_calls` 都必须有对�
 | 16 | 逐个填表的周期性操作不会被拦下 | 合法周期不能被误伤 |
 | 17 | 宿主缩小确认范围后不再逐步打扰 | 确认边界 = 可逆性 |
 | 18 | 需要老人自己做的步骤会带标记 | 悬浮窗据此展开"这一步要您自己做" |
+| 19 | 结果声明与真实输入 payload 对齐 | 参数顺序、收件人与正文混淆、旧证据不能冒充本轮输入 |
+| 20 | 输入文字不等于发送/支付/提交成功 | 没有独立效果证据时拒绝虚假完成 |
+| 21 | 只有观察没有改变却声称完成 | `OutcomeCheck` 拒绝无状态变化的声明 |
+| 22 | `type_text` / `paste_text` / `input_text` 风险词 | core 在审批前拦截，0 次执行并返回 `PAUSED(needsPerson=true)` |
 
 ## 不覆盖什么
 
@@ -51,4 +55,4 @@ Android 相关的路径**无法在这里验证**，只能在真机上手工测�
 
 - `Harness.kt`：检查本体，用假的 `AgentTools`/`AgentPlanner`/`ActionApproval` 驱动循环
 - `mock_server.py`：mock 的 OpenAI 兼容端点，校验 transcript 后返回预设动作
-- `run.sh`：构建 + 编译 + 起 mock + 跑检查
+- `run.sh` / `run.py`：构建 harness、起临时端口 mock、跑检查并传递退出码

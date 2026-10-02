@@ -20,4 +20,4 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "yinling-hotline"
-include(":core", ":app")
+include(":core", ":app", ":harness")

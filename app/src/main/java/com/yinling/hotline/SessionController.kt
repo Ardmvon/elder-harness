@@ -7,6 +7,7 @@ import com.yinling.core.AgentHook
 import com.yinling.core.AgentLoop
 import com.yinling.core.AgentMessage
 import com.yinling.core.AgentOutcome
+import com.yinling.core.PauseReason
 import com.yinling.core.AgentStep
 import com.yinling.core.ScreenElement
 import com.yinling.core.ScreenSnapshot
@@ -18,6 +19,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -35,6 +38,8 @@ data class SessionState(
     val hasPendingApproval: Boolean = false,
     /** The agent stopped because this step has to be done by the person themselves. */
     val needsPersonStep: Boolean = false,
+    /** The person reported an action, but the phone could not verify its external result. */
+    val outcomeUnverified: Boolean = false,
     /** A message from the trusted circle, shown as a big card and read aloud. */
     val circleMessage: PendingMessage? = null,
     /** The task passed the local completion check; waiting for the elder to say "this worked". */
@@ -183,8 +188,13 @@ class SessionController(private val app: HotlineApp) : FamilyGateway {
         if (!resumable && currentId.isNotBlank()) prefs.edit().remove("goal").apply()
         return SessionState(
             goal = if (resumable) goal else "",
-            message = if (resumable) "上次的事还可以接着办。" else "说出要办的事，我来帮您看下一步。",
+            message = when {
+                saved?.outcomeUnverified == true -> "上次的结果无法核实。请查看原页面，或结束这件事。"
+                resumable -> "上次的事还可以接着办。"
+                else -> "说出要办的事，我来帮您看下一步。"
+            },
             phase = if (resumable) TaskPhase.PAUSED else TaskPhase.IDLE,
+            outcomeUnverified = resumable && saved?.outcomeUnverified == true,
         )
     }
 
@@ -226,19 +236,20 @@ class SessionController(private val app: HotlineApp) : FamilyGateway {
             .apply()
         mutableState.value = SessionState(
             goal = saved.goal,
-            message = "接着上次没办完的事。",
+            message = if (saved.outcomeUnverified) "上次的结果无法核实。请查看原页面，或结束这件事。" else "接着上次没办完的事。",
             phase = TaskPhase.PAUSED,
             step = saved.steps,
+            outcomeUnverified = saved.outcomeUnverified,
         )
         LoopLog.event("[session] restore id=$id goal=${saved.goal.take(30)} messages=${saved.messages.size} cached prefix reused")
-        launch(resume = true)
+        if (!saved.outcomeUnverified) launch(resume = true)
     }
 
     fun history(): List<SavedSession> = sessions.list()
 
     fun deleteSession(id: String) {
-        sessions.delete(id)
         if (id == sessionId) finish()
+        sessions.delete(id)
     }
 
     private fun newSessionId(): String = "s" + System.currentTimeMillis().toString(36)
@@ -259,7 +270,7 @@ class SessionController(private val app: HotlineApp) : FamilyGateway {
                 updatedAt = System.currentTimeMillis(),
                 status = when (state.value.phase) {
                     TaskPhase.COMPLETED -> "done"
-                    else -> "paused"
+                    else -> if (state.value.outcomeUnverified) "unverified" else "paused"
                 },
                 steps = running.stepCount,
                 messages = conversation,
@@ -268,7 +279,9 @@ class SessionController(private val app: HotlineApp) : FamilyGateway {
     }
 
     fun resume() {
-        if (state.value.goal.isBlank()) return
+        if (state.value.goal.isBlank() || state.value.outcomeUnverified ||
+            state.value.phase !in setOf(TaskPhase.PAUSED, TaskPhase.NEEDS_PERSON, TaskPhase.NEEDS_FAMILY, TaskPhase.CANNOT)
+        ) return
         launch(resume = true)
     }
 
@@ -511,7 +524,12 @@ class SessionController(private val app: HotlineApp) : FamilyGateway {
     private fun launch(resume: Boolean) {
         job?.cancel()
         pendingApprovalPrompt = null
-        mutableState.value = state.value.copy(phase = TaskPhase.WORKING, hasPendingApproval = false)
+        mutableState.value = state.value.copy(
+            phase = TaskPhase.WORKING,
+            hasPendingApproval = false,
+            needsPersonStep = false,
+            outcomeUnverified = false,
+        )
         job = scope.launch {
             try {
                 // Let the host app come back to the foreground before the first observation.
@@ -538,6 +556,7 @@ class SessionController(private val app: HotlineApp) : FamilyGateway {
                     }
                 }
                 val outcome = if (resume) running.resume() else running.start(state.value.goal)
+                currentCoroutineContext().ensureActive()
                 settle(outcome)
             } catch (cancelled: kotlinx.coroutines.CancellationException) {
                 LoopLog.event("[session] cancelled")
@@ -741,34 +760,41 @@ class SessionController(private val app: HotlineApp) : FamilyGateway {
             is AgentOutcome.PAUSED -> mutableState.value = state.value.copy(
                 message = outcome.message, phase = TaskPhase.PAUSED,
                 step = steps, hasPendingApproval = false, needsPersonStep = outcome.needsPerson,
+                outcomeUnverified = outcome.reason == PauseReason.OUTCOME_UNVERIFIED,
             )
             is AgentOutcome.STUCK -> mutableState.value = state.value.copy(
                 message = outcome.message, phase = TaskPhase.PAUSED,
-                step = steps, hasPendingApproval = false,
+                step = steps, hasPendingApproval = false, needsPersonStep = false,
+                outcomeUnverified = false,
             )
             is AgentOutcome.STEP_LIMIT -> mutableState.value = state.value.copy(
                 message = outcome.message, phase = TaskPhase.PAUSED,
-                step = steps, hasPendingApproval = false,
+                step = steps, hasPendingApproval = false, needsPersonStep = false,
+                outcomeUnverified = false,
             )
             is AgentOutcome.FAMILY -> mutableState.value = state.value.copy(
                 message = outcome.message, phase = TaskPhase.NEEDS_FAMILY,
-                step = steps, hasPendingApproval = false,
+                step = steps, hasPendingApproval = false, needsPersonStep = false,
+                outcomeUnverified = false,
             )
             // Reported as its own state: the task was not achieved, and showing "已完成" here
             // would be the most damaging kind of wrong answer for the person relying on it.
             is AgentOutcome.IMPOSSIBLE -> mutableState.value = state.value.copy(
                 message = outcome.message, phase = TaskPhase.CANNOT,
-                step = steps, hasPendingApproval = false,
+                step = steps, hasPendingApproval = false, needsPersonStep = false,
+                outcomeUnverified = false,
             )
             // The person does this step themselves; the family is not involved.
             is AgentOutcome.NEEDS_PERSON -> mutableState.value = state.value.copy(
                 message = outcome.message, phase = TaskPhase.NEEDS_PERSON,
-                step = steps, hasPendingApproval = false,
+                step = steps, hasPendingApproval = false, needsPersonStep = true,
+                outcomeUnverified = false,
             )
             // Waiting for an answer: the task is not finished, it is blocked on information.
             is AgentOutcome.ASKING -> mutableState.value = state.value.copy(
                 message = outcome.message, phase = TaskPhase.ASKING,
                 step = steps, hasPendingApproval = false, options = outcome.options,
+                needsPersonStep = false, outcomeUnverified = false,
             )
         }
         // Every ending is read out loud: the conclusion, the question, and the refusal alike. These
@@ -786,15 +812,21 @@ class SessionController(private val app: HotlineApp) : FamilyGateway {
     fun stop() {
         job?.cancel()
         confirmation?.cancel()
+        if (state.value.outcomeUnverified || state.value.goal.isBlank()) return
         mutableState.value = state.value.copy(
             message = "已停下。需要时可以接着办。",
             phase = TaskPhase.PAUSED,
             hasPendingApproval = false,
+            needsPersonStep = false,
+            outcomeUnverified = false,
         )
+        saveCurrentSession()
     }
 
     fun finish() {
+        val completed = state.value.phase == TaskPhase.COMPLETED
         stop()
+        if (completed) sessions.markDone(sessionId) else sessions.markClosed(sessionId)
         // A skill summary may still be running. Invalidate its session id and cancel it, otherwise
         // its late result could write a message into the next, empty session.
         skillJob?.cancel()

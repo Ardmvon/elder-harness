@@ -20,7 +20,7 @@ import kotlinx.coroutines.launch
 object DebugCommand {
     /** Keys declared as booleans; every other key is read as a string. */
     private val BOOLEAN_EXTRAS = setOf(
-        EXTRA_ENABLE, EXTRA_VISION, EXTRA_AUTO_CONFIRM, EXTRA_START, EXTRA_CLEAR_LOG, EXTRA_RESTORE,
+        EXTRA_ENABLE, EXTRA_VISION, EXTRA_START, EXTRA_CLEAR_LOG, EXTRA_RESTORE,
         EXTRA_CENSUS, EXTRA_CALIBRATE_TAP, EXTRA_PAIR, EXTRA_CHECK_IN, EXTRA_VOICE_TEST,
     )
 
@@ -48,10 +48,8 @@ object DebugCommand {
 
     const val EXTRA_ENABLE = "developer_mode"
     const val EXTRA_API_KEY = "apikey"
-    const val EXTRA_ENDPOINT = "endpoint"
     const val EXTRA_MODEL = "model"
     const val EXTRA_VISION = "vision"
-    const val EXTRA_AUTO_CONFIRM = "dev_mode"
     const val EXTRA_GOAL = "goal"
     const val EXTRA_START = "start"
     const val EXTRA_CLEAR_LOG = "clear_log"
@@ -67,9 +65,6 @@ object DebugCommand {
 
     /** Restores the most recent saved task instead of starting a new one. */
     const val EXTRA_RESTORE = "restore"
-
-    /** Trusted-circle server address, for wiring up a local server during development. */
-    const val EXTRA_SERVER = "server"
 
     /** Elder's name as the circle will see it. */
     const val EXTRA_ELDER = "elder"
@@ -96,11 +91,8 @@ object DebugCommand {
         val prefs = context.getSharedPreferences("hotline", 0)
         val edit = prefs.edit()
 
-        // Security: endpoint and auto_confirm are not settable via intent. They control where API
-        // calls go and whether the person sees confirmation prompts. An attacker who can send intents
-        // (zero permission on Android) must not be able to redirect API keys to their own server or
-        // silence the person's awareness of what the agent is doing. Set these in the settings UI.
-        (extras.value(EXTRA_SERVER) as? String)?.takeIf { it.isNotBlank() }?.let { edit.putString("server_url", it.trim().trimEnd('/')) }
+        // Endpoint, server address and confirmation mode remain in the settings UI. This debug-only
+        // intent may set model and vision for local development, but cannot redirect or silence it.
         (extras.value(EXTRA_ELDER) as? String)?.takeIf { it.isNotBlank() }?.let { edit.putString("elder_name", it.trim()) }
         (extras.value(EXTRA_MODEL) as? String)?.takeIf { it.isNotBlank() }?.let { edit.putString("model", it.trim()) }
         // Only touch a switch when the caller actually passed it, otherwise a debug launch would

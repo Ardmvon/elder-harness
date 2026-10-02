@@ -35,7 +35,7 @@ sealed interface OutcomeVerdict {
  */
 object OutcomeCheck {
 
-    private val TEXT_ENTRY = setOf("input_text", "paste_text", "type_text")
+    private val TEXT_ENTRY = ManualActionPolicy.textTools
 
     /**
      * Actions that can produce an effect outside this run. Navigation-only tools such as
@@ -62,12 +62,19 @@ object OutcomeCheck {
         "已支付", "已填", "已输入", "已保存", "已设置", "已开启", "已关闭", "已删除", "已关注",
         "已报名", "已预约", "已改", "已修改", "已添加", "已清空", "已上传", "已下载", "已安装",
         "已转发", "已回复", "已评论", "已下单成功", "下单成功", "提交成功", "改好了", "设置好了",
+        "填好了", "填入了", "输入好了",
     )
 
     /** Quoted fragments: what the run claims it produced, or a label it read. */
-    private val QUOTED = Regex("[「“\"']([^」”\"']{1,40})[」”\"']")
+    private val QUOTED = Regex("[「“\"']([^」”\"']{1,2000})[」”\"']")
 
-    /** Clock readings such as 17:37 — used as a time anchor against the run's own start. */
+    private val UNVERIFIED_EFFECTS = listOf(
+        "已发送", "发送成功", "发出去了", "已发出", "已付款", "已支付", "已下单", "下单成功", "已提交", "提交成功",
+    )
+    private val PAYLOAD_PREFIX = Regex("(?:填(?:好|入|进)?(?:了)?|输入(?:好)?(?:了)?|写入(?:了)?|(?:改|设(?:置)?|填)为|为)[：:\\s]*$")
+    private val PAYLOAD_SUFFIX = Regex("^[\\s]*(?:填(?:好|入|进)|写入|输入|放进)")
+    private val FIELD_SUFFIX = Regex("^[\\s]*(?:为|是)")
+
     private val CLOCK = Regex("(?<!\\d)([01]?\\d|2[0-3]):([0-5]\\d)(?!\\d)")
 
     /**
@@ -80,35 +87,22 @@ object OutcomeCheck {
         val claim = claim.replace("已经", "已")
         val assertsChange = CHANGE_CLAIMS.any { claim.contains(it) }
         if (!assertsChange) return OutcomeVerdict.Supported
-        val successful = calls.filter { it.success }
+        val successful = calls.filter { it.success && it.atMillis >= runStartedAt }
+        if (UNVERIFIED_EFFECTS.any(claim::contains)) {
+            return OutcomeVerdict.Unsupported("执行记录没有核验发送、支付或提交结果，输入文字不等于已完成这些操作")
+        }
 
-        // R1 — text provenance. If the run says it produced text, at least one quoted fragment must
-        // have been typed into this run. Checking "at least one" deliberately avoids guessing which
-        // quote is the payload: "在微信「文件传输助手」的输入框里填好了「我到家了」" quotes both the
-        // recipient/context and the message; the longest fragments are often labels, not payload.
-        // A claim whose every quote is borrowed still fails, which is the floor this check provides.
-        val quoted = QUOTED.findAll(claim)
-            .map { it.groupValues[1].trim() }
-            .filter { it.isNotEmpty() }
-            .toList()
-        if (quoted.isNotEmpty()) {
-            val typed = successful
-                .filter { it.tool in TEXT_ENTRY }
-                .joinToString(" ") { call ->
-                    // For input_text, argument is "target text"; extract only the text part
-                    if (call.tool == "input_text") {
-                        call.argument.substringAfter(' ', "")
-                    } else {
-                        call.argument
-                    }
-                }
-            val traceable = quoted.firstOrNull { typed.contains(it) }
-            if (traceable == null) {
-                val evidence = quoted.maxByOrNull { it.length } ?: quoted.first()
-                return OutcomeVerdict.Unsupported(
-                    "声明里引用的文字（「$evidence」）不是这一次输入进去的，" +
-                        "可能是屏幕上本来就有的内容",
-                )
+        val matches = QUOTED.findAll(claim).toList()
+        val payloads = matches.filter { match ->
+            val prefix = claim.substring(0, match.range.first)
+            val suffix = claim.substring(match.range.last + 1)
+            !FIELD_SUFFIX.containsMatchIn(suffix) &&
+                (PAYLOAD_PREFIX.containsMatchIn(prefix) || PAYLOAD_SUFFIX.containsMatchIn(suffix))
+        }.map { it.groupValues[1].trim() }.filter { it.isNotEmpty() }
+        if (matches.isNotEmpty()) {
+            val typed = successful.filter { it.tool in TEXT_ENTRY }.map { it.argument }
+            if (payloads.isEmpty() || payloads.any { payload -> typed.none { it.contains(payload) } }) {
+                return OutcomeVerdict.Unsupported("声明中的输入正文无法对应到本轮成功输入的文字，收件人或页面标签不能代替正文")
             }
         }
 
@@ -136,8 +130,7 @@ object OutcomeCheck {
     fun explain(verdict: OutcomeVerdict): String = when (verdict) {
         is OutcomeVerdict.Supported -> ""
         is OutcomeVerdict.Unsupported ->
-            "我没法确认这件事真的办成了：${verdict.reason}。请您自己看一眼；" +
-                "要我接着办，就按下面的按钮。"
+            "我没法确认这件事真的办成了：${verdict.reason}。请您查看原页面，或结束这件事。"
     }
 
     private const val TIME_SLACK_MINUTES = 1

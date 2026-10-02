@@ -334,7 +334,11 @@ private fun HomePage(
     val circleMessage = state.circleMessage
     // One line, and only when it says something the person would want to know. A message from the
     // family outranks the task, because it is short and was sent by a person waiting for a reply.
-    val statusLine = if (circleMessage != null) "家人有话说" else statusText(state.phase)
+    val statusLine = when {
+        circleMessage != null -> "家人有话说"
+        state.outcomeUnverified -> "结果无法核实"
+        else -> statusText(state.phase)
+    }
     val tone = if (circleMessage != null) Elder.brand else statusTone(state.phase)
     var typing by remember { mutableStateOf(false) }
 
@@ -359,17 +363,18 @@ private fun HomePage(
             // The circle always means "the one obvious thing to do now". It used to be a dead
             // control whenever a task was paused: tapping it opened an input that was only rendered
             // when no task existed, so the biggest button on the screen did nothing.
-            val resumable = state.phase == TaskPhase.PAUSED ||
+            val resumable = !state.outcomeUnverified && (state.phase == TaskPhase.PAUSED ||
                 state.phase == TaskPhase.NEEDS_PERSON ||
                 state.phase == TaskPhase.NEEDS_FAMILY ||
-                state.phase == TaskPhase.CANNOT
+                state.phase == TaskPhase.CANNOT)
             val circleCaption = when {
                 circleMessage != null -> "知道了"
                 speaking -> "我在说…"
                 transcribing -> "正在听懂…"
                 listening -> "正在听…"
-                busy -> "停下来"
+                busy -> "暂停办理"
                 state.phase == TaskPhase.COMPLETED -> "知道了"
+                state.outcomeUnverified -> "结束这件事"
                 resumable -> "接着办"
                 canListen || voiceAvailable -> "说给接线员听"
                 else -> "打字或说话"
@@ -381,6 +386,7 @@ private fun HomePage(
                 listening -> "说完就停，或再点一下"
                 busy -> "正在办事，点一下就停"
                 state.phase == TaskPhase.COMPLETED -> "这件事办好了"
+                state.outcomeUnverified -> "结果未核实，点一下结束任务"
                 resumable -> "上次这件事还没办完"
                 canListen -> "点一下开始说话"
                 voiceAvailable -> "点一下，说出您要办的事"
@@ -398,6 +404,7 @@ private fun HomePage(
                     busy -> Icons.Default.Close
                     listening || transcribing -> Icons.Default.Mic
                     state.phase == TaskPhase.COMPLETED -> Icons.Default.Check
+                    state.outcomeUnverified -> Icons.Default.Close
                     resumable -> Icons.AutoMirrored.Filled.KeyboardArrowRight
                     canListen || voiceAvailable -> Icons.Default.Mic
                     else -> Icons.Default.Edit
@@ -409,6 +416,7 @@ private fun HomePage(
                         transcribing -> Unit
                         busy -> onStop()
                         state.phase == TaskPhase.COMPLETED -> onFinish()
+                        state.outcomeUnverified -> onFinish()
                         resumable -> onResumeTask()
                         canListen -> onListen()
                         voiceAvailable -> onVoice()
@@ -423,8 +431,10 @@ private fun HomePage(
             // The person asked for this once; it should not take over the one-button home screen.
             val unfinished = history.firstOrNull { it.unfinished }
             if (circleMessage == null && !hasTask && unfinished != null) {
-                TextButton(onClick = { onRestore(unfinished.id) }) {
-                    Text("上次没办完的事", fontSize = Elder.hint, color = Elder.inkSoft)
+                ElderCard {
+                    Text("上次没办完的事", fontSize = Elder.heading, fontWeight = FontWeight.SemiBold)
+                    Text(unfinished.goal, fontSize = Elder.body)
+                    ElderPrimaryButton("接着办这件事", { onRestore(unfinished.id) })
                 }
             }
 
@@ -470,12 +480,25 @@ private fun HomePage(
                     ElderPrimaryButton("回答", { onAnswer(answer) }, enabled = answer.isNotBlank())
                 }
 
+                state.outcomeUnverified -> ElderCard {
+                    Text("结果无法核实", fontSize = Elder.heading, fontWeight = FontWeight.SemiBold)
+                    Text(state.message, fontSize = Elder.body)
+                    ElderSecondaryButton("结束这件事", onFinish)
+                }
+
                 state.phase == TaskPhase.NEEDS_PERSON ||
                     state.phase == TaskPhase.PAUSED ||
                     state.phase == TaskPhase.NEEDS_FAMILY ||
                     state.phase == TaskPhase.CANNOT -> ElderCard {
+                    if (state.goal.isNotBlank()) {
+                        Text("要办的事", fontSize = Elder.hint, color = Elder.inkSoft)
+                        Text(state.goal, fontSize = Elder.body, fontWeight = FontWeight.SemiBold)
+                    }
                     Text(state.message, fontSize = Elder.body)
-                    ElderPrimaryButton("我做好了，继续", onResumeTask)
+                    ElderPrimaryButton(
+                        if (state.phase == TaskPhase.NEEDS_PERSON || state.needsPersonStep) "我已操作，继续" else "接着办",
+                        onResumeTask,
+                    )
                     ElderSecondaryButton("结束这件事", onFinish)
                 }
 

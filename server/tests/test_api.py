@@ -400,3 +400,30 @@ def test_transcribe_failure_is_reported_as_unavailable(client, device, monkeypat
 def test_speech_status_endpoint(client):
     body = client.get("/api/speech/status").json()
     assert set(body) == {"configured", "style"}
+
+
+def test_watch_check_is_disabled_without_a_server_token(client, monkeypatch):
+    from app import main, watch
+
+    monkeypatch.setattr(main, "WATCH_TOKEN", "")
+    monkeypatch.setattr(watch, "check_silence", lambda **kwargs: pytest.fail("unauthorized watcher ran"))
+    assert client.post("/api/watch/check").status_code == 404
+
+
+def test_watch_check_rejects_wrong_token_without_running(client, monkeypatch):
+    from app import main, watch
+
+    monkeypatch.setattr(main, "WATCH_TOKEN", "watch-secret")
+    monkeypatch.setattr(watch, "check_silence", lambda **kwargs: pytest.fail("unauthorized watcher ran"))
+    assert client.post("/api/watch/check", headers={"Authorization": "Bearer wrong"}).status_code == 401
+    assert client.post("/api/watch/check").status_code == 401
+
+
+def test_watch_check_accepts_the_configured_token(client, monkeypatch):
+    from app import main, watch
+
+    monkeypatch.setattr(main, "WATCH_TOKEN", "watch-secret")
+    monkeypatch.setattr(watch, "check_silence", lambda **kwargs: [{"title": "有人需要帮助"}])
+    response = client.post("/api/watch/check", headers={"Authorization": "Bearer watch-secret"})
+    assert response.status_code == 200
+    assert response.json() == {"raised": ["有人需要帮助"]}
