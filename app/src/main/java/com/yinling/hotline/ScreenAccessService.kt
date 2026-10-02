@@ -137,6 +137,20 @@ class ScreenAccessService : AccessibilityService() {
 
         /** Result of checking text against manual-action words. */
         data class TextSafetyCheck(val safe: Boolean, val hitWord: String? = null)
+
+        /**
+         * Checks text content (to be typed or pasted) against manual-action words.
+         * Returns safe=false when the text contains a word that requires the person to input it themselves.
+         * Made a companion method so it can be called early, before service availability is checked.
+         */
+        fun checkTextForManualActions(text: String): TextSafetyCheck {
+            val hit = manualActions.firstOrNull { text.contains(it) }
+            return if (hit != null) {
+                TextSafetyCheck(safe = false, hitWord = hit)
+            } else {
+                TextSafetyCheck(safe = true)
+            }
+        }
     }
 
     override fun onServiceConnected() {
@@ -352,19 +366,6 @@ class ScreenAccessService : AccessibilityService() {
     }
 
     fun snapshot(): ScreenSnapshot = readPage().use { it.screen }
-
-    /**
-     * Checks text content (to be typed or pasted) against manual-action words.
-     * Returns safe=false when the text contains a word that requires the person to input it themselves.
-     */
-    fun checkTextForManualActions(text: String): Companion.TextSafetyCheck {
-        val hit = manualActions.firstOrNull { text.contains(it) }
-        return if (hit != null) {
-            Companion.TextSafetyCheck(safe = false, hitWord = hit)
-        } else {
-            Companion.TextSafetyCheck(safe = true)
-        }
-    }
 
     private fun failure(code: String, message: String) = ToolResult(false, message, code)
 

@@ -794,6 +794,75 @@ fun main() = runBlocking {
         check("把话讲给老人听", hook.messages.any { it.contains("我没法确认") })
     }
 
+    // 22) type_text / paste_text / input_text 必须拦截风险词
+    header("输入路径的风险词检查")
+    run {
+        val riskyText = "确认支付"
+        var executed = 0
+        val phone = object : AgentTools {
+            override val catalog = PhoneToolCatalog.specs
+            override suspend fun observe() = ScreenSnapshot(
+                app = "com.mock.app", labels = listOf("输入框"), revision = "r1",
+                elements = listOf(
+                    ScreenElement("e1", "输入框", "", "EditText", listOf(0, 0, 100, 50),
+                        true, false, true, false, true),
+                ),
+            )
+            override suspend fun execute(call: ToolCall): ToolResult {
+                executed++
+                return ToolResult(true, "不应被执行")
+            }
+        }
+
+        // Test type_text
+        val typeLoop = AgentLoop(
+            object : AgentPlanner {
+                override suspend fun decide(
+                    instructions: String, tools: List<AgentToolSpec>, transcript: List<AgentMessage>,
+                ) = AgentStep.Calls(listOf(ToolInvocation("t1", "type_text", mapOf("text" to riskyText))))
+            },
+            phone,
+            object : ActionApproval { override suspend fun confirm(invocation: ToolInvocation) = true },
+            CloudPlanner.INSTRUCTIONS, Logging(), renderScreen = { PhoneToolCatalog.render(it) },
+        )
+        executed = 0
+        val typeOutcome = typeLoop.start("输入")
+        check("type_text 输入风险词必须被拦截", executed == 0)
+        check("type_text 返回 manual_action_required", typeOutcome is AgentOutcome.NEEDS_PERSON)
+
+        // Test paste_text
+        val pasteLoop = AgentLoop(
+            object : AgentPlanner {
+                override suspend fun decide(
+                    instructions: String, tools: List<AgentToolSpec>, transcript: List<AgentMessage>,
+                ) = AgentStep.Calls(listOf(ToolInvocation("p1", "paste_text", mapOf("text" to riskyText))))
+            },
+            phone,
+            object : ActionApproval { override suspend fun confirm(invocation: ToolInvocation) = true },
+            CloudPlanner.INSTRUCTIONS, Logging(), renderScreen = { PhoneToolCatalog.render(it) },
+        )
+        executed = 0
+        val pasteOutcome = pasteLoop.start("粘贴")
+        check("paste_text 输入风险词必须被拦截", executed == 0)
+        check("paste_text 返回 manual_action_required", pasteOutcome is AgentOutcome.NEEDS_PERSON)
+
+        // Test input_text
+        val inputLoop = AgentLoop(
+            object : AgentPlanner {
+                override suspend fun decide(
+                    instructions: String, tools: List<AgentToolSpec>, transcript: List<AgentMessage>,
+                ) = AgentStep.Calls(listOf(ToolInvocation("i1", "input_text", mapOf("target" to "e1", "text" to riskyText))))
+            },
+            phone,
+            object : ActionApproval { override suspend fun confirm(invocation: ToolInvocation) = true },
+            CloudPlanner.INSTRUCTIONS, Logging(), renderScreen = { PhoneToolCatalog.render(it) },
+        )
+        executed = 0
+        val inputOutcome = inputLoop.start("填写")
+        check("input_text 输入风险词必须被拦截", executed == 0)
+        check("input_text 返回 manual_action_required", inputOutcome is AgentOutcome.NEEDS_PERSON)
+    }
+
     header(if (failures == 0) "全部通过" else "$failures 项失败")
     if (failures > 0) kotlin.system.exitProcess(1)
 }
