@@ -143,6 +143,7 @@ sealed interface AgentOutcome {
         val awaitingApproval: Boolean = false,
         /** True when the next move is the person's own: payment, verification, sending. */
         val needsPerson: Boolean = false,
+        val reason: PauseReason = PauseReason.GENERAL,
     ) : AgentOutcome
 
     /** Only a human should continue. */
@@ -171,6 +172,12 @@ sealed interface AgentOutcome {
 
     data class STUCK(override val message: String) : AgentOutcome
     data class STEP_LIMIT(override val message: String) : AgentOutcome
+}
+
+enum class PauseReason {
+    GENERAL,
+    PERSON_ACTION,
+    OUTCOME_UNVERIFIED,
 }
 
 /** One generation plus the local execution of whatever it asked for. */
@@ -365,6 +372,7 @@ class AgentLoop(
         observeIntoScreen()
         captureWhenBlind()
         val generated = generate()
+        currentCoroutineContext().ensureActive()
         // Whatever image the request carried has been sent; never repeat it on later steps.
         clearImages()
         when (val step = generated) {
@@ -392,7 +400,11 @@ class AgentLoop(
                             "如果要继续，请真的把这一步做出来，再说明结果；做不到就如实讲。）",
                     )
                     hook.onMessage(honest)
-                    return AgentOutcome.PAUSED(honest, needsPerson = true)
+                    return AgentOutcome.PAUSED(
+                        honest,
+                        needsPerson = false,
+                        reason = PauseReason.OUTCOME_UNVERIFIED,
+                    )
                 }
                 transcript += assistant(text)
                 hook.onMessage(text)
@@ -433,6 +445,7 @@ class AgentLoop(
         if (screenshotFailures >= SCREENSHOT_FAILURE_LIMIT) return
 
         val observed = tools.observe()
+        if (observed.sensitive) return
         // A drawn page looks usable in the tree but holds none of the content; attaching the picture
         // unasked removes the incentive to open cells one by one just to find out what they say.
         if (!lastScreenWasBlind && observed.revision == graphicalShotRevision) return
@@ -476,7 +489,8 @@ class AgentLoop(
      */
     private suspend fun observeIntoScreen() {
         val screen = tools.observe()
-        val rendered = renderScreen(screen)
+        if (screen.sensitive) clearImages()
+        val rendered = if (screen.sensitive) PhoneToolCatalog.render(screen) else renderScreen(screen)
         if (rendered.isBlank()) return
         lastScreenWasBlind = screen.elements.none { it.clickable || it.editable || it.scrollable }
         lastScreenWasGraphical =
@@ -564,6 +578,19 @@ class AgentLoop(
     private suspend fun execute(assistantIndex: Int, invocations: List<ToolInvocation>): AgentOutcome? {
         pending = invocations
 
+        val safetyScreen = tools.observe()
+        val failures = invocations.map { invocation ->
+            ManualActionPolicy.checkText(invocation) ?: ManualActionPolicy.checkScreen(invocation.tool, safetyScreen)
+        }
+        val safetyFailure = failures.firstOrNull { it != null }
+        if (safetyFailure != null) {
+            pending = emptyList()
+            appendResults(invocations, failures.map { failure ->
+                failure ?: ToolResult(false, "同一批次包含需要本人完成的操作，本批次未执行。", "blocked_by_safety")
+            })
+            return AgentOutcome.PAUSED(safetyFailure.detail, needsPerson = true, reason = PauseReason.PERSON_ACTION)
+        }
+
         val needsAnswer = invocations.filter { spec(it.tool)?.needsApproval == true }
         if (needsAnswer.isNotEmpty()) {
             var denied = false
@@ -627,6 +654,7 @@ class AgentLoop(
                 if (invocation.tool == ASK_USER_TOOL) {
                     question = invocation.arguments["question"].orEmpty().ifBlank { "请告诉我更多信息。" }
                     choices = parseOptions(invocation.arguments["options"].orEmpty())
+                        .filter { ManualActionPolicy.textHit(it) == null }
                     executed += invocation to ToolResult(true, "已经向老人提问，等待回答。")
                     continue
                 }
@@ -672,17 +700,27 @@ class AgentLoop(
                     ToolResult(false, "参数无效：$invalid，请根据工具目录修正。", invalid)
                 } else {
                     hook.onAction(describe(invocation))
-                    tools.execute(call)
+                    ManualActionPolicy.checkScreen(invocation.tool, tools.observe()) ?: tools.execute(call)
                 }
                 alreadyRun[key] = result
                 if (spec.informational && result.success) fetched += key
                 executed += invocation to result
                 executedCalls += ExecutedCall(
                     tool = invocation.tool,
-                    argument = invocation.arguments.values.joinToString(" "),
+                    argument = if (invocation.tool in ManualActionPolicy.textTools) {
+                        invocation.arguments["text"].orEmpty()
+                    } else {
+                        invocation.arguments.values.joinToString(" ")
+                    },
                     success = result.success,
                     atMillis = System.currentTimeMillis(),
                 )
+                if (result.code == "requires_user") {
+                    executed += invocations.drop(executed.size).map { skipped ->
+                        skipped to ToolResult(false, "前面的操作需要本人完成，本步骤未执行。", "blocked_by_safety")
+                    }
+                    break
+                }
             }
         } catch (cancelled: CancellationException) {
             // A stop in the middle of a batch is never allowed to leave a partial model transcript
@@ -744,6 +782,7 @@ class AgentLoop(
                 AgentOutcome.PAUSED(
                     results.first { it.code == "requires_user" }.detail,
                     needsPerson = true,
+                    reason = PauseReason.PERSON_ACTION,
                 )
             repairs >= maxRepairs ->
                 AgentOutcome.PAUSED("这一步总是做不成，已停下。您可以自己操作，或请家人帮忙。")

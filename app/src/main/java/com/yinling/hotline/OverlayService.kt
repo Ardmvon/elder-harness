@@ -342,8 +342,9 @@ class OverlayService : Service() {
         val isResult = state.phase == TaskPhase.COMPLETED || state.phase == TaskPhase.CANNOT
         // Only the cases where the next move is the person's own: the agent refused an irreversible
         // step for them, or asked them to do it. A run that merely got stuck keeps the generic panel.
-        val isPersonStep = state.needsPersonStep || state.phase == TaskPhase.NEEDS_PERSON
-        if (!isResult && !isPersonStep) {
+        val isPersonStep = state.phase == TaskPhase.NEEDS_PERSON ||
+            (state.phase == TaskPhase.PAUSED && state.needsPersonStep && !state.outcomeUnverified)
+        if (!isResult && !isPersonStep && !state.outcomeUnverified) {
             // Same dot-and-word status line as the home screen, so the two surfaces agree.
             card.addView(OverlayUi.statusRow(this, state.phase))
             card.addView(OverlayUi.gap(this))
@@ -379,7 +380,7 @@ class OverlayService : Service() {
                 )
                 row(
                     card,
-                    (if (state.phase.isResumable()) "接着办" else "停下来") to {
+                    (if (state.phase.isResumable()) "接着办" else "暂停办理") to {
                         if (state.phase.isResumable()) session.resume() else session.stop()
                     },
                     "收起" to { expanded = false; render(session.state.value) },
@@ -389,14 +390,22 @@ class OverlayService : Service() {
             state.phase == TaskPhase.COMPLETED || state.phase == TaskPhase.CANNOT ->
                 resultCard(card, state, phaseChanged && !expanding)
 
+            state.outcomeUnverified -> unverifiedCard(card, state)
+
             isPersonStep -> personStepCard(card, state, phaseChanged && !expanding)
+
+            state.phase == TaskPhase.PAUSED -> {
+                card.addView(optionButton("接着办") { session.resume() })
+                row(card, "打开银龄专线" to { openHome() }, "结束这件事" to { session.finish() })
+                card.addView(optionButton("收起") { expanded = false; render(session.state.value) })
+            }
 
             // Opened by hand while the agent is working: keep it short, so it stays out of the way
             // while still giving one obvious way to stop.
             state.phase == TaskPhase.WORKING -> {
                 row(
                     card,
-                    "停下来" to { session.stop() },
+                    "暂停办理" to { session.stop() },
                     "收起" to { openedWhileWorking = false; expanded = false; render(session.state.value) },
                 )
             }
@@ -405,7 +414,7 @@ class OverlayService : Service() {
                 row(card, "打开" to { openHome() }, "找家人" to { familyRow(card, state) })
                 row(
                     card,
-                    (if (state.phase == TaskPhase.ASKING) "回答" else if (state.phase.isResumable()) "接着办" else "停下来") to {
+                    (if (state.phase == TaskPhase.ASKING) "回答" else if (state.phase.isResumable()) "接着办" else "暂停办理") to {
                         when {
                             state.phase == TaskPhase.ASKING -> openHome()
                             state.phase.isResumable() -> session.resume()
@@ -438,6 +447,7 @@ class OverlayService : Service() {
         session.speaking.value -> "正在说…"
         session.voice.state.value == VoiceSession.State.RECORDING -> "正在听…"
         session.voice.state.value == VoiceSession.State.TRANSCRIBING -> "正在听懂…"
+        state.outcomeUnverified -> "无法核实"
         state.needsPersonStep -> "等您操作"
         state.phase == TaskPhase.WORKING && state.step > 0 -> "正在办 ${state.step}"
         state.phase == TaskPhase.WORKING -> "正在办"
@@ -527,14 +537,23 @@ class OverlayService : Service() {
             LinearLayout.LayoutParams.MATCH_PARENT,
             LinearLayout.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(8) })
-        val go = optionButton("我做好了，继续") { session.resume() }
+        val go = optionButton("我已操作，继续") { session.resume() }
         card.addView(go)
-        row(card, "找家人" to { familyRow(card, state) }, "停下来" to { session.stop() })
+        row(card, "收起查看页面" to { expanded = false; render(session.state.value) }, "暂停办理" to { session.stop() })
+        row(card, "打开银龄专线" to { openHome() }, "结束这件事" to { session.finish() })
         if (animate) {
             animatePop(heading, 0)
             animateIn(body, 90)
             animatePop(go, 170)
         }
+    }
+
+    private fun unverifiedCard(card: LinearLayout, state: SessionState) {
+        card.addView(OverlayUi.text(this, "结果无法核实", Elder.status.value, OverlayUi.attention, bold = true))
+        card.addView(OverlayUi.gap(this))
+        card.addView(OverlayUi.tinted(this, state.message, OverlayUi.waitTint))
+        card.addView(optionButton("收起，查看页面") { expanded = false; render(session.state.value) })
+        row(card, "打开银龄专线" to { openHome() }, "结束这件事" to { session.finish() })
     }
 
     /**
@@ -620,13 +639,12 @@ class OverlayService : Service() {
             LinearLayout.LayoutParams.MATCH_PARENT,
             LinearLayout.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(8) })
-        var capped = false
         scroller.viewTreeObserver.addOnGlobalLayoutListener(object : ViewTreeObserver.OnGlobalLayoutListener {
             override fun onGlobalLayout() {
-                if (capped) return
+                if (root.width < panelWidth()) return
+                scroller.viewTreeObserver.removeOnGlobalLayoutListener(this)
                 val cap = dp(340)
                 if (conclusion.height > cap) {
-                    capped = true
                     scroller.layoutParams = scroller.layoutParams.apply { height = cap }
                     // A half-visible line looks like a bug unless we say it can be scrolled.
                     scroller.isScrollbarFadingEnabled = false
@@ -765,6 +783,9 @@ class OverlayService : Service() {
     }
 
     private fun openHome() {
+        expanded = false
+        openedWhileWorking = false
+        render(session.state.value)
         startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
     }
 

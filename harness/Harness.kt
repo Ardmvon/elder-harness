@@ -35,14 +35,14 @@ private class FakePhone : AgentTools {
 }
 
 private fun planner(): CloudPlanner =
-    CloudPlanner(ModelConfig("http://127.0.0.1:8731", "mock-model", "test-key", visionEnabled = false))
+    CloudPlanner(ModelConfig(System.getenv("ELDERHARNESS_MOCK_URL") ?: "http://127.0.0.1:8731", "mock-model", "test-key", visionEnabled = false))
 
 private fun retryPlanner(): CloudPlanner =
-    CloudPlanner(ModelConfig("http://127.0.0.1:8731", "test-mode:retry", "test-key", visionEnabled = false))
+    CloudPlanner(ModelConfig(System.getenv("ELDERHARNESS_MOCK_URL") ?: "http://127.0.0.1:8731", "test-mode:retry", "test-key", visionEnabled = false))
 
 /** A provider that looks at the page and then claims a send it never performed. */
 private fun claimPlanner(): CloudPlanner =
-    CloudPlanner(ModelConfig("http://127.0.0.1:8731", "test-mode:claim", "test-key", visionEnabled = false))
+    CloudPlanner(ModelConfig(System.getenv("ELDERHARNESS_MOCK_URL") ?: "http://127.0.0.1:8731", "test-mode:claim", "test-key", visionEnabled = false))
 
 private class Logging : AgentHook {
     val messages = mutableListOf<String>()
@@ -760,7 +760,7 @@ fun main() = runBlocking {
         check(
             "引用本次运行之后的时刻，不算借用旧证据",
             OutcomeCheck.check(
-                "已发送「我到家了」，时间是 17:45。",
+                "已填「我到家了」，时间是 17:45。",
                 listOf(call("paste_text", "我到家了")),
                 started,
             ) is OutcomeVerdict.Supported,
@@ -814,6 +814,8 @@ fun main() = runBlocking {
             }
         }
 
+        var approvals = 0
+
         // Test type_text
         val typeLoop = AgentLoop(
             object : AgentPlanner {
@@ -822,13 +824,13 @@ fun main() = runBlocking {
                 ) = AgentStep.Calls(listOf(ToolInvocation("t1", "type_text", mapOf("text" to riskyText))))
             },
             phone,
-            object : ActionApproval { override suspend fun confirm(invocation: ToolInvocation) = true },
+            object : ActionApproval { override suspend fun confirm(invocation: ToolInvocation): Boolean { approvals++; return true } },
             CloudPlanner.INSTRUCTIONS, Logging(), renderScreen = { PhoneToolCatalog.render(it) },
         )
         executed = 0
         val typeOutcome = typeLoop.start("输入")
         check("type_text 输入风险词必须被拦截", executed == 0)
-        check("type_text 返回 manual_action_required", typeOutcome is AgentOutcome.NEEDS_PERSON)
+        check("type_text 返回暂停并需要本人", typeOutcome is AgentOutcome.PAUSED && typeOutcome.needsPerson)
 
         // Test paste_text
         val pasteLoop = AgentLoop(
@@ -838,13 +840,13 @@ fun main() = runBlocking {
                 ) = AgentStep.Calls(listOf(ToolInvocation("p1", "paste_text", mapOf("text" to riskyText))))
             },
             phone,
-            object : ActionApproval { override suspend fun confirm(invocation: ToolInvocation) = true },
+            object : ActionApproval { override suspend fun confirm(invocation: ToolInvocation): Boolean { approvals++; return true } },
             CloudPlanner.INSTRUCTIONS, Logging(), renderScreen = { PhoneToolCatalog.render(it) },
         )
         executed = 0
         val pasteOutcome = pasteLoop.start("粘贴")
         check("paste_text 输入风险词必须被拦截", executed == 0)
-        check("paste_text 返回 manual_action_required", pasteOutcome is AgentOutcome.NEEDS_PERSON)
+        check("paste_text 返回暂停并需要本人", pasteOutcome is AgentOutcome.PAUSED && pasteOutcome.needsPerson)
 
         // Test input_text
         val inputLoop = AgentLoop(
@@ -854,13 +856,14 @@ fun main() = runBlocking {
                 ) = AgentStep.Calls(listOf(ToolInvocation("i1", "input_text", mapOf("target" to "e1", "text" to riskyText))))
             },
             phone,
-            object : ActionApproval { override suspend fun confirm(invocation: ToolInvocation) = true },
+            object : ActionApproval { override suspend fun confirm(invocation: ToolInvocation): Boolean { approvals++; return true } },
             CloudPlanner.INSTRUCTIONS, Logging(), renderScreen = { PhoneToolCatalog.render(it) },
         )
         executed = 0
         val inputOutcome = inputLoop.start("填写")
         check("input_text 输入风险词必须被拦截", executed == 0)
-        check("input_text 返回 manual_action_required", inputOutcome is AgentOutcome.NEEDS_PERSON)
+        check("input_text 返回暂停并需要本人", inputOutcome is AgentOutcome.PAUSED && inputOutcome.needsPerson)
+        check("风险输入在审批前拦截", approvals == 0)
     }
 
     header(if (failures == 0) "全部通过" else "$failures 项失败")

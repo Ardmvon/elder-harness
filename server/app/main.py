@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import os
+import secrets
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -40,6 +41,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 # is told. Overridable so tests (and a demo) do not have to wait hours.
 HEARTBEAT_SECONDS = int(os.environ.get("HOTLINE_HEARTBEAT_SECONDS", "300"))
 SILENCE_SECONDS = int(os.environ.get("HOTLINE_SILENCE_SECONDS", str(watch.DEFAULT_SILENCE_SECONDS)))
+WATCH_TOKEN = os.environ.get("HOTLINE_WATCH_TOKEN", "").strip()
 
 
 @asynccontextmanager
@@ -308,6 +310,11 @@ def message(
 @app.post("/api/watch/check")
 def trigger_watch(authorization: str | None = Header(default=None)) -> dict[str, Any]:
     """For tests and for a cron-style deployment; the background task calls the same function."""
+    if not WATCH_TOKEN:
+        raise HTTPException(status_code=404, detail="定时检查接口未启用")
+    supplied = (authorization or "").removeprefix("Bearer ").strip()
+    if not supplied or not secrets.compare_digest(supplied, WATCH_TOKEN):
+        raise HTTPException(status_code=401, detail="定时检查令牌无效")
     raised = watch.check_silence(silence_seconds=SILENCE_SECONDS)
     return {"raised": [event["title"] for event in raised]}
 

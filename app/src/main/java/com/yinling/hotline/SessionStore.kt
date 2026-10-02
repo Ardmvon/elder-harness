@@ -22,7 +22,8 @@ data class SavedSession(
     val steps: Int,
     val messages: List<AgentMessage>,
 ) {
-    val unfinished: Boolean get() = status != STATUS_DONE
+    val unfinished: Boolean get() = status != STATUS_DONE && status != "closed"
+    val outcomeUnverified: Boolean get() = status == "unverified"
 }
 
 private const val STATUS_DONE = "done"
@@ -58,6 +59,10 @@ class SessionStore(private val context: Context) {
 
     fun markDone(id: String) {
         load(id)?.let { save(it.copy(status = STATUS_DONE, updatedAt = System.currentTimeMillis())) }
+    }
+
+    fun markClosed(id: String) {
+        load(id)?.let { save(it.copy(status = "closed", updatedAt = System.currentTimeMillis())) }
     }
 
     /** Keeps the newest sessions only; old ones are noise for a person who wants "last time". */

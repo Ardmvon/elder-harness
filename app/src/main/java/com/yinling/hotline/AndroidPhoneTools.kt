@@ -1,5 +1,6 @@
 package com.yinling.hotline
 
+import com.yinling.core.ManualActionPolicy
 import com.yinling.core.AgentTools
 import com.yinling.core.AgentToolSpec
 import com.yinling.core.PhoneToolCatalog
@@ -13,7 +14,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 
-/** The Android implementation of the phone tools. All safety checks live on this side. */
+/** The Android implementation of the phone tools. Platform safety is rechecked before side effects. */
 class AndroidPhoneTools(private val app: HotlineApp) : AgentTools {
 
     private fun injectText(text: String): ToolResult = try {
@@ -52,24 +53,7 @@ class AndroidPhoneTools(private val app: HotlineApp) : AgentTools {
         // Skill lookup is pure data, available everywhere and never touches the screen.
         if (call.name == "load_skill") return@withContext SkillCatalog.load(call)
 
-        // Block text input containing manual-action words across all three input paths.
-        // This check must run regardless of service availability, because type_text can execute
-        // via injectText() without the accessibility service.
-        if (call.name in setOf("type_text", "paste_text", "input_text")) {
-            val textToCheck = when (call.name) {
-                "type_text", "paste_text" -> call.text
-                "input_text" -> call.text  // Fixed: was call.argument, which is used by open_app
-                else -> ""
-            }
-            val check = ScreenAccessService.checkTextForManualActions(textToCheck)
-            if (!check.safe) {
-                return@withContext ToolResult(
-                    false,
-                    "文字中包含「${check.hitWord}」，这类内容需要本人亲自确认并输入，AI 代理不能代劳。请向本人说明情况。",
-                    "manual_action_required"
-                )
-            }
-        }
+        ManualActionPolicy.checkText(call.name, call.text)?.let { return@withContext it }
         if (call.name == "current_time") {
             // The person speaks in relative time and nothing else in the request says what today is.
             val now = java.text.SimpleDateFormat("yyyy年M月d日 EEEE HH:mm", java.util.Locale.CHINA)
@@ -97,6 +81,9 @@ class AndroidPhoneTools(private val app: HotlineApp) : AgentTools {
         // Focused-field typing for pages without an accessibility tree. The accessibility path
         // (input_text) needs a node to write into, which WeChat does not expose.
         if (call.name == "type_text") {
+            val service = ScreenAccessService.active
+                ?: return@withContext ToolResult(false, "无法确认页面安全，请您自己输入后按继续。", "requires_user")
+            service.validateFocusedInput(call.revision)?.let { return@withContext it }
             return@withContext withContext(Dispatchers.IO) { injectText(call.text) }
         }
         if (call.name == "open_settings") {
@@ -111,12 +98,12 @@ class AndroidPhoneTools(private val app: HotlineApp) : AgentTools {
         // has to perform the paste itself, because since Android 10 only the foreground app may
         // read the clipboard.
         if (call.name == "paste_text") {
+            service.validateFocusedInput(call.revision)?.let { return@withContext it }
             val clipboard = app.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
                 as android.content.ClipboardManager
             clipboard.setPrimaryClip(android.content.ClipData.newPlainText("银龄专线", call.text))
-            delay(120)
             try {
-                service.pasteIntoFocusedField()
+                return@withContext service.pasteIntoFocusedField(call.revision)
             } finally {
                 // The clipboard is process-wide, and the pasted text may be private. Do not leave
                 // it behind for the next app that reads the clipboard.

@@ -95,4 +95,47 @@ class AgentLoopCancellationTest {
         assertTrue(outcome is AgentOutcome.COMPLETED, "resume must re-plan from the cleared batch")
         assertEquals(listOf("e1"), tools.executed, "an executed action must never run twice")
     }
+
+    @Test
+    fun `unverified send claim pauses without offering another automatic retry`() = runBlocking {
+        val planner = object : AgentPlanner {
+            private var turn = 0
+            override suspend fun decide(
+                instructions: String,
+                tools: List<AgentToolSpec>,
+                transcript: List<AgentMessage>,
+            ): AgentStep = if (turn++ == 0) {
+                AgentStep.Calls(listOf(ToolInvocation("c1", "click", mapOf("target" to "e1"))))
+            } else {
+                AgentStep.Final("消息已发送成功")
+            }
+        }
+        val tools = FakeTools()
+        val outcome = AgentLoop(planner, tools, noApproval, "instructions").start("给家人发消息")
+
+        assertTrue(outcome is AgentOutcome.PAUSED)
+        assertEquals(PauseReason.OUTCOME_UNVERIFIED, outcome.reason)
+        assertEquals(listOf("e1"), tools.executed)
+    }
+
+    @Test
+    fun `manual action result carries person action reason`() = runBlocking {
+        val tools = object : AgentTools {
+            override val catalog = FakeTools().catalog
+            override suspend fun observe() = ScreenSnapshot(null, emptyList(), revision = "r1")
+            override suspend fun execute(call: ToolCall) = ToolResult(false, "请本人操作", "requires_user")
+        }
+        val planner = object : AgentPlanner {
+            override suspend fun decide(
+                instructions: String,
+                tools: List<AgentToolSpec>,
+                transcript: List<AgentMessage>,
+            ) = AgentStep.Calls(listOf(ToolInvocation("c1", "click", mapOf("target" to "e1"))))
+        }
+        val outcome = AgentLoop(planner, tools, noApproval, "instructions").start("需要本人操作")
+
+        assertTrue(outcome is AgentOutcome.PAUSED)
+        assertEquals(PauseReason.PERSON_ACTION, outcome.reason)
+        assertTrue(outcome.needsPerson)
+    }
 }

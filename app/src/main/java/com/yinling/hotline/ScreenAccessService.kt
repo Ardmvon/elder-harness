@@ -17,6 +17,8 @@ import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
 import androidx.annotation.RequiresApi
+import com.yinling.core.ManualActionPolicy
+import com.yinling.core.TextInputTarget
 import com.yinling.core.ScreenElement
 import com.yinling.core.ScreenImage
 import com.yinling.core.ScreenSnapshot
@@ -37,10 +39,6 @@ class ScreenAccessService : AccessibilityService() {
         @Volatile
         var keyboardVisible = false
             private set
-
-        /** Where the input strip of a chat-style app sits, as a fraction of the screen. */
-        private const val INPUT_STRIP_X = 0.45f
-        private const val INPUT_STRIP_Y = 0.965f
 
         /** Role used for keyboard nodes so the page can list them separately. */
         const val KEYBOARD_ROLE = "Key"
@@ -124,33 +122,8 @@ class ScreenAccessService : AccessibilityService() {
         }
 
         private val sensitiveWords = listOf("收款方", "付款码", "确认支付", "输入密码", "验证码", "人脸识别")
-        private val manualActions = listOf(
-            "支付", "付款", "转账", "发出", "发送", "提交", "下单", "认证", "授权", "验证码", "密码",
-            "删除", "购买", "呼叫", "拨打",
-            // Ordering vocabulary. With per-step confirmation gone, these words are the automatic
-            // gate that keeps an irreversible step in the person's own hands; the list is what the
-            // agent may never press by itself, not a restriction on what it may look at.
-            "结算", "拼单", "收银台", "去支付", "立即支付", "确认支付", "立即购买", "一键购买",
-            "确认下单", "提交订单", "确认付款", "付款码", "免密", "先用后付", "充值", "提现",
-            "还款", "打赏", "订阅", "续费", "确认收货", "立即预订", "确认预订",
-        )
+        private val manualActions = ManualActionPolicy.manualActionWords
 
-        /** Result of checking text against manual-action words. */
-        data class TextSafetyCheck(val safe: Boolean, val hitWord: String? = null)
-
-        /**
-         * Checks text content (to be typed or pasted) against manual-action words.
-         * Returns safe=false when the text contains a word that requires the person to input it themselves.
-         * Made a companion method so it can be called early, before service availability is checked.
-         */
-        fun checkTextForManualActions(text: String): TextSafetyCheck {
-            val hit = manualActions.firstOrNull { text.contains(it) }
-            return if (hit != null) {
-                TextSafetyCheck(safe = false, hitWord = hit)
-            } else {
-                TextSafetyCheck(safe = true)
-            }
-        }
     }
 
     override fun onServiceConnected() {
@@ -372,10 +345,6 @@ class ScreenAccessService : AccessibilityService() {
     /** Re-observe immediately before dispatch. Approval never authorizes a different page. */
     suspend fun perform(call: ToolCall): ToolResult = readPage().use { page ->
         val screen = page.screen
-        // A live page (video countdown, unread badge, ad rotation) churns its revision even though
-        // nothing the person cares about moved. Demanding an exact revision match made actions fail
-        // constantly, so a stale revision is accepted when the target itself is still there with
-        // the same label. Identity is checked below; this is only a cheap first gate.
         val staleRevision = call.revision.isBlank() || call.revision != screen.revision
         if (call.name in setOf("back", "home", "recents")) {
             val action = when (call.name) {
@@ -398,6 +367,11 @@ class ScreenAccessService : AccessibilityService() {
                 },
             )
         }
+        if (call.name in setOf("tap", "swipe", "click", "tap_text", "long_press", "input_text", "set_slider") &&
+            staleRevision
+        ) {
+            return failure("stale_screen", "页面已变化，请重新观察后再操作。")
+        }
         // Coordinate tapping exists for pages that expose no accessibility tree (WeChat and
         // friends), where there is nothing to look up by node at all.
         if (call.name == "tap") {
@@ -414,17 +388,6 @@ class ScreenAccessService : AccessibilityService() {
             return gesture(call)
         }
         if (call.name == "screenshot") return screenshot(screen)
-        fun stillTheSame(id: String, wanted: String): Boolean {
-            val element = screen.elements.find { it.id == id } ?: return false
-            return when {
-                wanted.startsWith("viewId:") -> element.viewId == wanted.removePrefix("viewId:")
-                wanted == "slider" -> element.isSlider
-                wanted.startsWith("bounds:") -> "bounds:${element.bounds}" == wanted
-                wanted.isBlank() -> true
-                else -> element.text == wanted || element.description == wanted
-            }
-        }
-
         val target = if (call.name == "tap_text") {
             // Be liberal about what the model sends back: it sometimes copies a whole rendered line,
             // annotations included ("30日（TextView）"), which then matches nothing at all.
@@ -470,11 +433,6 @@ class ScreenAccessService : AccessibilityService() {
         } else call.target
         if (screen.elements.none { it.id == target } && call.name != "tap_text") {
             return failure("missing_target", "控件编号不存在于当前观察，请重新选择。")
-        }
-        if (staleRevision && call.name != "tap_text" && call.target.isNotBlank() &&
-            (call.expected.isBlank() || !stillTheSame(call.target, call.expected))
-        ) {
-            return failure("stale_screen", "页面已变化，请根据新页面重新选择操作。")
         }
         val node = page.nodes[target] ?: return failure("missing_target", "控件已消失，请重新观察。")
         if (!node.isVisibleToUser || !node.isEnabled || node.isPassword) return failure("unavailable_target", "控件当前不可操作。")
@@ -575,6 +533,25 @@ class ScreenAccessService : AccessibilityService() {
         return null
     }
 
+    fun validateFocusedInput(expectedRevision: String): ToolResult? {
+        val screen = snapshot()
+        if (expectedRevision.isBlank() || expectedRevision != screen.revision) {
+            return failure("stale_screen", "页面已变化，请重新观察后再输入。")
+        }
+        val focused = findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+        return try {
+            val target = focused?.let {
+                TextInputTarget(
+                    app = it.packageName?.toString(), editable = it.isEditable,
+                    enabled = it.isEnabled, visible = it.isVisibleToUser, password = it.isPassword,
+                )
+            }
+            ManualActionPolicy.checkFocusedInput(screen, target)
+        } finally {
+            focused?.recycle()
+        }
+    }
+
     /**
      * Pastes into whatever field currently has input focus.
      *
@@ -582,64 +559,27 @@ class ScreenAccessService : AccessibilityService() {
      * honour a paste performed by their own focused field. That only works when the focused view
      * is reachable through accessibility; when it is not, the person has to paste manually.
      */
-    suspend fun pasteIntoFocusedField(): ToolResult {
-        tryPaste()?.let { return it }
-
-        // Nothing to paste into. On a page with no accessibility tree the input box cannot be found
-        // by node, so the model has to hit it by coordinate — and missing it is the single most
-        // common failure in these flows (no focus means no keyboard, no candidate row, nothing).
-        // The input strip is a platform convention at the bottom of the screen, so tap it for the
-        // model instead of asking it to aim again.
-        if (snapshot().elements.isEmpty()) {
-            val metrics = resources.displayMetrics
-            val tapped = dispatchTap(metrics.widthPixels * INPUT_STRIP_X, metrics.heightPixels * INPUT_STRIP_Y)
-            if (tapped) {
-                delay(500)
-                tryPaste()?.let {
-                    return ToolResult(true, "已自动点中输入框并粘贴，等待检查页面。", screenChanged = true)
-                }
+    suspend fun pasteIntoFocusedField(expectedRevision: String): ToolResult {
+        validateFocusedInput(expectedRevision)?.let { return it }
+        val focused = findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+        try {
+            val target = focused?.let {
+                TextInputTarget(
+                    app = it.packageName?.toString(), editable = it.isEditable,
+                    enabled = it.isEnabled, visible = it.isVisibleToUser, password = it.isPassword,
+                )
             }
-        }
-        return failure(
-            "not_editable",
-            "没能把文字放进输入框（这一页读不到控件）。输入框通常在屏幕最底部那条，" +
-                "可以自己用 tap_xy 点它一下再 paste_text；不要点键盘上的按键。",
-        )
-    }
-
-    /** Pastes into the focused editable node, or null when there is nothing to paste into. */
-    private fun tryPaste(): ToolResult? {
-        val focused = findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: return null
-        val editable = generateSequence(focused) { it.parent }
-            .firstOrNull { it.isEditable }
-            ?: focused.takeIf { it.isEditable }
-            ?: return null
-        val ok = editable.performAction(AccessibilityNodeInfo.ACTION_PASTE)
-        return if (ok) {
-            ToolResult(true, "已粘贴文字，等待检查页面。", screenChanged = true)
-        } else {
-            failure("paste_rejected", "这个应用不接受程序粘贴，请让老人自己粘贴或输入。")
+            ManualActionPolicy.checkFocusedInput(snapshot(), target)?.let { return it }
+            val ok = focused?.performAction(AccessibilityNodeInfo.ACTION_PASTE) == true
+            return if (ok) {
+                ToolResult(true, "已粘贴文字，等待检查页面。", screenChanged = true)
+            } else {
+                failure("requires_user", "这个应用不接受程序粘贴，请您自己输入后按继续。")
+            }
+        } finally {
+            focused?.recycle()
         }
     }
-
-    /** Taps an absolute pixel position; used when the agent has to act without a readable tree. */
-    private suspend fun dispatchTap(x: Float, y: Float): Boolean = withTimeoutOrNull(2000) {
-        suspendCancellableCoroutine { continuation ->
-            val path = Path().apply { moveTo(x, y); lineTo(x + 1f, y + 1f) }
-            val gesture = GestureDescription.Builder()
-                .addStroke(GestureDescription.StrokeDescription(path, 0, 60))
-                .build()
-            dispatchGesture(gesture, object : GestureResultCallback() {
-                override fun onCompleted(gestureDescription: GestureDescription?) {
-                    if (continuation.isActive) continuation.resume(true)
-                }
-
-                override fun onCancelled(gestureDescription: GestureDescription?) {
-                    if (continuation.isActive) continuation.resume(false)
-                }
-            }, null)
-        }
-    } ?: false
 
     /** Taps a screen position. `tap_xy` fractions are already converted to pixels by the loop. */
     private suspend fun tapAt(call: ToolCall): ToolResult = withTimeoutOrNull(2500) {
@@ -766,7 +706,7 @@ class ScreenAccessService : AccessibilityService() {
 
     /**
      * Scaling, compression and base64 for one screenshot. CPU-bound: call it off the main thread.
-     * Requires API 30 for WEBP_LOSSLESS; its only caller, [screenshot], returns early below that.
+     * Requires API 30 for WEBP_LOSSLESS; its only caller, [screenshot], returns early below API 30.
      */
     @RequiresApi(Build.VERSION_CODES.R)
     private fun encodeShot(bitmap: Bitmap, screen: ScreenSnapshot): ToolResult {

@@ -200,7 +200,10 @@ object PhoneToolCatalog {
     fun render(screen: ScreenSnapshot): String = buildString {
         append("当前页面：").append(screen.app ?: "未知应用")
         if (screen.width > 0) append("（").append(screen.width).append('x').append(screen.height).append("）")
-        if (screen.sensitive) append("  ⚠ 敏感页面：需要老人本人操作")
+        if (screen.sensitive) {
+            append("  ⚠ 敏感页面：需要老人本人操作，页面内容已隐藏。")
+            return@buildString
+        }
         append('\n')
 
         // The keyboard is listed before the page and regardless of which branch the page takes: it
