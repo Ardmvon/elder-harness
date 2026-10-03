@@ -612,8 +612,6 @@ class AgentLoop(
             }
         }
 
-        val observed = tools.observe()
-
         val executed = mutableListOf<Pair<ToolInvocation, ToolResult>>()
         // Asking for the same call several times in one batch is the model stalling, e.g. tapping
         // one spot six times hoping it is the send button. Execute each distinct call once, but
@@ -694,13 +692,20 @@ class AgentLoop(
                     )
                     continue
                 }
-                val call = resolveCoordinates(invocation, observed)
                 val invalid = validate(spec, invocation)
                 val result = if (invalid != null) {
                     ToolResult(false, "参数无效：$invalid，请根据工具目录修正。", invalid)
                 } else {
                     hook.onAction(describe(invocation))
-                    ManualActionPolicy.checkScreen(invocation.tool, tools.observe()) ?: tools.execute(call)
+                    // Re-observe immediately before dispatch, so the revision and the target identity
+                    // describe the page this call is really sent to. Resolving once for the whole
+                    // batch made the second call fail as stale_screen after the first one changed the
+                    // page (tap the input box, then paste the text).
+                    val dispatchScreen = tools.observe()
+                    ManualActionPolicy.checkScreen(invocation.tool, dispatchScreen) ?: run {
+                        val call = resolveCoordinates(invocation, dispatchScreen)
+                        tools.execute(call)
+                    }
                 }
                 alreadyRun[key] = result
                 if (spec.informational && result.success) fetched += key
