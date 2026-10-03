@@ -43,11 +43,12 @@ def main() -> int:
         env = os.environ.copy()
         env["ELDERHARNESS_MOCK_URL"] = url
         gradlew = "gradlew.bat" if os.name == "nt" else "./gradlew"
-        result = subprocess.run(
-            [str(ROOT / gradlew), ":harness:run", "--offline", "--console=plain"],
-            cwd=ROOT,
-            env=env,
-        )
+        command = [str(ROOT / gradlew), ":harness:run", "--console=plain"]
+        # Gradle must be allowed to fetch :harness dependencies on a machine that has never built
+        # them; offline is opt-in for repeat runs and air-gapped setups.
+        if os.environ.get("ELDERHARNESS_OFFLINE") == "1":
+            command.append("--offline")
+        result = subprocess.run(command, cwd=ROOT, env=env)
         return result.returncode
     finally:
         server.terminate()

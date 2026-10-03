@@ -7,7 +7,7 @@
 harness/run.sh          # 全通过时退出码 0
 ```
 
-前置：JDK 17、`python3`，以及 Gradle 能解析项目依赖。脚本通过 `:harness:run` 编译，使用临时端口启动 mock 服务，不再手工拼接本机缓存 jar。
+前置：JDK 17、`python3`，首次运行需要联网让 Gradle 解析 `:harness` 的依赖（之后可以用 `ELDERHARNESS_OFFLINE=1 bash harness/run.sh` 离线跑）。脚本通过 `:harness:run` 编译，使用临时端口启动 mock 服务，不再手工拼接本机缓存 jar。
 
 ## 为什么要有它
 
